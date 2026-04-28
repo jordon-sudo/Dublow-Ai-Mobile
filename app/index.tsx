@@ -13,6 +13,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import Markdown from 'react-native-markdown-display';
 import { useSettings } from '../src/store/settingsStore';
 import { useChat } from '../src/store/chatStore';
+import { useConversations } from '../src/store/conversationsStore';
+import ConversationsDrawer from '../src/components/ConversationsDrawer';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { TOOL_CATALOG, groupedTools, ToolDef } from '../src/lib/tools';
 import { StatusBubble } from '../src/components/StatusBubble';
@@ -36,6 +38,11 @@ export default function ChatScreen() {
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const activeTitle = useConversations((s) =>
+  s.activeId ? s.conversations[s.activeId]?.title ?? 'Chat' : 'Chat',
+);
+  const newConversation = useConversations((s) => s.newConversation);
   const [toolsPickerOpen, setToolsPickerOpen] = useState(false);
   const listRef = useRef<FlatList>(null);
 
@@ -103,13 +110,18 @@ await client.streamChat(
 );
   };
 
-  const confirmClear = () => {
-    if (messages.length === 0) return;
-    Alert.alert('Start a new chat?', 'This will delete the current conversation.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'New Chat', style: 'destructive', onPress: () => clear() },
-    ]);
-  };
+  const handleNewChat = () => {
+  // If the current conversation is already empty and untouched,
+  // reuse it instead of creating yet another blank thread.
+  const active = useConversations.getState().getActive();
+  if (active && active.messages.length === 0) {
+    // Nothing to do; user is already looking at a fresh chat.
+    Haptics.selectionAsync().catch(() => {});
+    return;
+  }
+  newConversation();
+  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+};
 
   const pickAndUpload = async () => {
     console.log('[pickAndUpload] invoked');
@@ -170,29 +182,31 @@ await client.streamChat(
     <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
       {/* Two-row header */}
       <View style={[styles.header, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-        <View style={{ flex: 1 }}>
-          <Pressable onPress={() => setTargetPickerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
-            <Text style={[styles.headerTitle, { color: theme.colors.text }]}>Chat</Text>
-            <Ionicons name="chevron-down" size={16} color={theme.colors.textMuted} style={{ marginLeft: 4 }} />
-          </Pressable>
-          <Text style={[styles.headerSub, { color: theme.colors.textMuted }]} numberOfLines={1}>
-            {currentTarget?.label ?? 'Select a model'}
-          </Text>
-        </View>
-        <Link href={'/apps' as any} asChild>
-          <Pressable style={styles.iconBtn} hitSlop={8}>
-            <Ionicons name="apps-outline" size={22} color={theme.colors.text} />
-            </Pressable>
-        </Link>
-        <Pressable onPress={confirmClear} style={styles.iconBtn} hitSlop={8}>
-          <Ionicons name="create-outline" size={22} color={theme.colors.text} />
-        </Pressable>
-        <Link href="/settings" asChild>
-          <Pressable style={styles.iconBtn} hitSlop={8}>
-            <Ionicons name="settings-outline" size={22} color={theme.colors.text} />
-          </Pressable>
-        </Link>
-      </View>
+  <View style={{ flex: 1 }}>
+    <Pressable onPress={() => setDrawerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
+      <Text style={styles.headerTitle}>{activeTitle || 'Chat'}</Text>
+      <Text style={[styles.headerSub, { color: theme.colors.textMuted }]} numberOfLines={1}>
+        {currentTarget?.label ?? 'Select a model'}
+      </Text>
+    </Pressable>
+  </View>
+
+  <Link href={'/apps' as any} asChild>
+    <Pressable style={styles.iconBtn} hitSlop={8}>
+      <Ionicons name="apps-outline" size={22} color={theme.colors.text} />
+    </Pressable>
+  </Link>
+
+  <Pressable onPress={handleNewChat} style={styles.iconBtn} hitSlop={8}>
+    <Ionicons name="create-outline" size={22} color={theme.colors.text} />
+  </Pressable>
+
+  <Link href="/settings" asChild>
+    <Pressable style={styles.iconBtn} hitSlop={8}>
+      <Ionicons name="settings-outline" size={22} color={theme.colors.text} />
+    </Pressable>
+  </Link>
+</View>
 
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <FlatList
@@ -439,6 +453,8 @@ await client.streamChat(
           </Pressable>
         </Pressable>
       </Modal>
+
+      <ConversationsDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </SafeAreaView>
   );
 }
@@ -464,8 +480,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  headerTitleRow: { flexDirection: 'row', alignItems: 'center' },
-  headerTitle: { fontSize: fontSize.lg, fontWeight: '700' },
+  headerTitleRow: { flexDirection: 'column', alignItems: 'flex-start' },
+  headerTitle: { fontSize: fontSize.lg, fontWeight: '700', color: '#fff' },
   headerSub: { fontSize: fontSize.xs, marginTop: 2 },
   iconBtn: { padding: spacing.sm, marginLeft: spacing.xs },
 

@@ -1,23 +1,19 @@
 // src/store/chatStore.ts
+// Thin compatibility shim over useConversations. Preserves the original
+// useChat() surface so existing screens keep working unchanged. All state
+// now lives in the active conversation inside conversationsStore, which
+// handles encrypted persistence and legacy migration.
 import { create } from 'zustand';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useConversations, ChatMsg } from './conversationsStore';
 
-const CHAT_KEY = 'hatz_chat_v2';
+export type { ChatMsg };
 
-export interface ChatMsg {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-}
-
-interface PersistedChat {
+interface ChatState {
+  hydrated: boolean;
   messages: ChatMsg[];
   attachedFileIds: string[];
   activeTools: string[];
   autoTools: boolean;
-}
-
-interface ChatState extends PersistedChat {
-  hydrated: boolean;
 
   hydrate: () => Promise<void>;
   clear: () => Promise<void>;
@@ -36,108 +32,97 @@ interface ChatState extends PersistedChat {
   setAutoTools: (b: boolean) => Promise<void>;
 }
 
-const DEFAULTS: PersistedChat = {
-  messages: [],
-  attachedFileIds: [],
-  activeTools: [],
-  autoTools: true,
-};
-
-async function persist(state: PersistedChat) {
-  await AsyncStorage.setItem(CHAT_KEY, JSON.stringify(state));
+/**
+ * Read the current active conversation and project it into the legacy
+ * ChatState shape. Called on every subscription notification below.
+ */
+function project(): Pick<
+  ChatState,
+  'messages' | 'attachedFileIds' | 'activeTools' | 'autoTools' | 'hydrated'
+> {
+  const c = useConversations.getState();
+  const active = c.activeId ? c.conversations[c.activeId] : null;
+  return {
+    hydrated: c.hydrated,
+    messages: active?.messages ?? [],
+    attachedFileIds: active?.attachedFileIds ?? [],
+    activeTools: active?.activeTools ?? [],
+    autoTools: active?.autoTools ?? true,
+  };
 }
 
 export const useChat = create<ChatState>((set, get) => ({
-  hydrated: false,
-  ...DEFAULTS,
+  ...project(),
 
   hydrate: async () => {
-    try {
-      const raw = await AsyncStorage.getItem(CHAT_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as Partial<PersistedChat>;
-        set({ ...DEFAULTS, ...parsed, hydrated: true });
-      } else {
-        set({ hydrated: true });
-      }
-    } catch (e) {
-      console.warn('chat hydrate failed', e);
-      set({ hydrated: true });
-    }
+    await useConversations.getState().hydrate();
+    set(project());
   },
 
   clear: async () => {
-    set({ ...DEFAULTS });
-    await AsyncStorage.removeItem(CHAT_KEY);
+    await useConversations.getState().clearActive();
+    set(project());
   },
 
   appendUser: (content) => {
-    const next = [...get().messages, { role: 'user' as const, content }];
-    set({ messages: next });
-    persist({
-      messages: next,
-      attachedFileIds: get().attachedFileIds,
-      activeTools: get().activeTools,
-      autoTools: get().autoTools,
-    });
+    useConversations.getState().appendUserToActive(content);
+    set(project());
   },
 
   appendAssistantDelta: (delta) => {
-    const msgs = get().messages;
-    const last = msgs[msgs.length - 1];
-    if (last && last.role === 'assistant') {
-      const updated = [...msgs.slice(0, -1), { ...last, content: last.content + delta }];
-      set({ messages: updated });
-    } else {
-      set({ messages: [...msgs, { role: 'assistant' as const, content: delta }] });
-    }
+    useConversations.getState().appendAssistantDeltaToActive(delta);
+    // Lightweight projection: avoid full recompute during streaming.
+    const active = useConversations.getState().getActive();
+    if (active) set({ messages: active.messages });
   },
 
   finalizeAssistant: () => {
-    persist({
-      messages: get().messages,
-      attachedFileIds: get().attachedFileIds,
-      activeTools: get().activeTools,
-      autoTools: get().autoTools,
-    });
+    // Fire-and-forget; conversationsStore handles persistence + auto-title.
+    void useConversations.getState().finalizeAssistantOnActive();
+    set(project());
   },
 
   setAttachedFileIds: async (ids) => {
-    set({ attachedFileIds: ids });
-    await persist({
-      messages: get().messages,
-      attachedFileIds: ids,
-      activeTools: get().activeTools,
-      autoTools: get().autoTools,
-    });
+    useConversations.getState().patchActive({ attachedFileIds: ids });
+    set(project());
   },
 
   addAttachedFileId: async (id) => {
-    const ids = Array.from(new Set([...get().attachedFileIds, id]));
-    await get().setAttachedFileIds(ids);
+    const current = useConversations.getState().getActive()?.attachedFileIds ?? [];
+    const ids = Array.from(new Set([...current, id]));
+    useConversations.getState().patchActive({ attachedFileIds: ids });
+    set(project());
   },
 
   removeAttachedFileId: async (id) => {
-    await get().setAttachedFileIds(get().attachedFileIds.filter((x) => x !== id));
+    const current = useConversations.getState().getActive()?.attachedFileIds ?? [];
+    useConversations
+      .getState()
+      .patchActive({ attachedFileIds: current.filter((x) => x !== id) });
+    set(project());
   },
 
   setActiveTools: async (tools) => {
-    set({ activeTools: tools });
-    await persist({
-      messages: get().messages,
-      attachedFileIds: get().attachedFileIds,
-      activeTools: tools,
-      autoTools: get().autoTools,
-    });
+    useConversations.getState().patchActive({ activeTools: tools });
+    set(project());
   },
 
   setAutoTools: async (b) => {
-    set({ autoTools: b });
-    await persist({
-      messages: get().messages,
-      attachedFileIds: get().attachedFileIds,
-      activeTools: get().activeTools,
-      autoTools: b,
-    });
+    useConversations.getState().patchActive({ autoTools: b });
+    set(project());
   },
 }));
+
+// Keep useChat in lock-step with conversationsStore: any change to the
+// active conversation (including switching conversations via the drawer)
+// re-projects into useChat so subscribed components re-render naturally.
+useConversations.subscribe((s, prev) => {
+  const activeChanged = s.activeId !== prev.activeId;
+  const hydrationChanged = s.hydrated !== prev.hydrated;
+  const activeConv = s.activeId ? s.conversations[s.activeId] : null;
+  const prevConv = prev.activeId ? prev.conversations[prev.activeId] : null;
+  const convChanged = activeConv !== prevConv;
+  if (activeChanged || hydrationChanged || convChanged) {
+    useChat.setState(project());
+  }
+});
