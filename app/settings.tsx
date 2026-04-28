@@ -10,6 +10,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '../src/store/settingsStore';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { groupedTools, ToolDef } from '../src/lib/tools';
+import { notifyJobComplete } from '../src/lib/notifications';
+
 
 export default function SettingsScreen() {
   const theme = useTheme();

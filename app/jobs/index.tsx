@@ -1,5 +1,5 @@
 // app/jobs/index.tsx
-// List of all tracked workflow jobs. Tap to open the detail screen.
+// List of all tracked jobs (workflows + client-side app pseudo-jobs).
 import React, { useEffect, useMemo } from 'react';
 import { View, Text, Pressable, StyleSheet, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -44,7 +44,7 @@ export default function JobsListScreen() {
         <View style={styles.center}><ActivityIndicator color={theme.colors.primary} /></View>
       ) : data.length === 0 ? (
         <View style={styles.center}>
-          <Text style={{ color: theme.colors.textMuted }}>No workflow runs yet.</Text>
+          <Text style={{ color: theme.colors.textMuted }}>No runs yet.</Text>
         </View>
       ) : (
         <FlatList
@@ -56,6 +56,12 @@ export default function JobsListScreen() {
               onPress={() => router.push(`/jobs/${item.job_id}` as any)}
               style={[styles.card, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
             >
+              <Ionicons
+                name={item.is_workflow ? 'git-branch-outline' : 'apps-outline'}
+                size={20}
+                color={theme.colors.textMuted}
+                style={{ marginRight: spacing.sm }}
+              />
               <View style={{ flex: 1 }}>
                 <Text style={[styles.cardTitle, { color: theme.colors.text }]} numberOfLines={1}>
                   {item.app_name}

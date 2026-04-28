@@ -53,7 +53,7 @@ export default function WorkflowRunnerScreen() {
       const data = await client.getAppRaw(String(appId));
       if (!isWorkflow(data)) {
         // Wrong runner for this id; bounce to the app runner.
-        router.replace(`/apps/${appId}` as any);
+        router.replace(`/app/${appId}` as any);
         return;
       }
       setApp(data);
@@ -75,25 +75,26 @@ export default function WorkflowRunnerScreen() {
     );
   }, [app, values]);
 
-  const run = async () => {
-    if (!client || !app) return;
-    setRunning(true);
-    setRunError(null);
-    try {
-      const id = (app as any).id ?? String(appId);
-      const { job_id } = await client.runWorkflow(id, values);
-      await trackJob({
-        job_id,
-        app_id: id,
-        app_name: app.name,
-        inputs: values,
-      });
-      router.replace(`/jobs/${job_id}` as any);
-    } catch (e: any) {
-      setRunError(e?.message ?? 'Run failed.');
-      setRunning(false);
-    }
-  };
+ const run = async () => {
+  if (!client || !app) return;
+  setRunning(true);
+  setRunError(null);
+  try {
+    const id = (app as any).id ?? String(appId);
+    const { job_id } = await client.runWorkflow(id, values);
+    await trackJob({
+      job_id,
+      app_id: id,
+      app_name: app.name,
+      inputs: values,
+    });
+    router.replace(`/jobs/${job_id}` as any);
+  } catch (e: any) {
+    console.warn('[wf-run] failed', e?.message, e);
+    setRunError(e?.message ?? 'Run failed.');
+    setRunning(false);
+  }
+};
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: theme.colors.bg }]} edges={['top']}>

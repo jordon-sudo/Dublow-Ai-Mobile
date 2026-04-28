@@ -22,6 +22,9 @@ import { HatzClient } from '../../src/lib/hatzClient';
 import AppInputForm, { type InputValues } from '../../src/components/AppInputForm';
 import type { AppItem, UserInput } from '../../src/lib/appsTypes';
 import { isWorkflow } from '../../src/lib/appsTypes';
+import * as Crypto from 'expo-crypto';
+import { useWorkflowJobs } from '../../src/store/workflowJobsStore';
+import { startAppRun } from '../../src/lib/appRunRegistry';
 
 export default function AppRunnerScreen() {
   const theme = useTheme();
@@ -70,20 +73,35 @@ export default function AppRunnerScreen() {
   }, [app, values]);
 
   const run = async () => {
-    if (!client || !app) return;
-    setRunning(true);
-    setRunError(null);
-    setResult(null);
-    try {
-      const id = (app as any).id ?? String(appId);
-      const output = await client.runApp({ appId: id, inputs: values });
-      setResult(typeof output === 'string' ? output : JSON.stringify(output, null, 2));
-    } catch (e: any) {
-      setRunError(e?.message ?? 'Run failed.');
-    } finally {
-      setRunning(false);
-    }
-  };
+  if (!client || !app) return;
+  setRunning(true);
+  setRunError(null);
+  setResult(null);
+  try {
+    const id = (app as any).id ?? String(appId);
+    const localJobId = `app-${Crypto.randomUUID()}`;
+
+    await useWorkflowJobs.getState().trackAppJob({
+      job_id: localJobId,
+      app_id: id,
+      app_name: app.name,
+      inputs: values,
+    });
+
+    startAppRun({
+      localJobId,
+      appId: id,
+      appName: app.name,
+      inputs: values,
+      client,
+    });
+
+    router.replace(`/jobs/${localJobId}` as any);
+  } catch (e: any) {
+    setRunError(e?.message ?? 'Run failed.');
+    setRunning(false);
+  }
+};
 
   const copyResult = async () => {
     if (!result) return;

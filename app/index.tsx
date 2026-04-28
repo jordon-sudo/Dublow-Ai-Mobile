@@ -1,567 +1,436 @@
-// app/index.tsx
-import { useState, useRef, useEffect } from 'react';
-import {
-  View, Text, TextInput, FlatList, Pressable,
-  KeyboardAvoidingView, Platform, StyleSheet, ActivityIndicator, Alert,
-  Modal, ScrollView,
-} from 'react-native';
-import { Link } from 'expo-router';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import * as DocumentPicker from 'expo-document-picker';
-import Markdown from 'react-native-markdown-display';
-import { useSettings } from '../src/store/settingsStore';
-import { useChat } from '../src/store/chatStore';
-import { useConversations } from '../src/store/conversationsStore';
-import ConversationsDrawer from '../src/components/ConversationsDrawer';
-import { useTheme, spacing, radii, fontSize } from '../src/theme';
-import { TOOL_CATALOG, groupedTools, ToolDef } from '../src/lib/tools';
-import { StatusBubble } from '../src/components/StatusBubble';
-import type { StreamStatus } from '../src/lib/hatzClient';
+// src/lib/hatzClient.ts
+// Thin wrapper around the Hatz AI REST API. All network calls live here.
+import { fetch as expoFetch } from 'expo/fetch';
+import type {
+  AppItem,
+  WorkflowJob,
+  RunWorkflowResponse,
+  PresignedUrlResponse,
+} from './appsTypes';
 
-export default function ChatScreen() {
-  const theme = useTheme();
-  const insets = useSafeAreaInsets();
-  const {
-    apiKey, selectedModel, models, apps, getClient, setSelectedModel,
-    getGroupedTargets, defaultTools, defaultAutoTools,
-  } = useSettings();
-  const {
-    messages, attachedFileIds, activeTools, autoTools,
-    appendUser, appendAssistantDelta, finalizeAssistant, clear,
-    setActiveTools, setAutoTools, addAttachedFileId, removeAttachedFileId,
-  } = useChat();
+const BASE_URL = 'https://ai.hatz.ai/v1';
 
-  const [input, setInput] = useState('');
-  const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [targetPickerOpen, setTargetPickerOpen] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const activeTitle = useConversations((s) =>
-  s.activeId ? s.conversations[s.activeId]?.title ?? 'Chat' : 'Chat',
-);
-  const newConversation = useConversations((s) => s.newConversation);
-  const [toolsPickerOpen, setToolsPickerOpen] = useState(false);
-  const listRef = useRef<FlatList>(null);
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
 
-  // One-time seed from settings defaults when a fresh chat has no prefs set.
-  useEffect(() => {
-    if (messages.length === 0) {
-      if (activeTools.length === 0 && defaultTools.length > 0) {
-        setActiveTools(defaultTools);
-      }
-      if (autoTools !== defaultAutoTools) {
-        setAutoTools(defaultAutoTools);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+export interface ModelInfo {
+  id: string;
+  label: string;
+  provider?: string;
+  kind: 'model' | 'agent';
+  raw?: any;
+}
 
-  const currentTarget = models.find((m) => m.id === selectedModel);
-  const canSend = !!apiKey && !!selectedModel && input.trim().length > 0 && !busy;
+export interface AppInfo {
+  id: string;
+  name: string;
+  description?: string;
+  inputs?: AppInput[];
+  raw?: any;
+}
 
-  const send = async () => {
-    const client = getClient();
-    if (!client || !selectedModel) return;
-    const userText = input.trim();
-    if (!userText) return;
+export interface AppInput {
+  name: string;
+  label?: string;
+  type?: string;
+  required?: boolean;
+  options?: string[];
+  placeholder?: string;
+}
 
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    setInput('');
-    appendUser(userText);
-    appendAssistantDelta('');
-    setBusy(true);
+export interface StreamChatRequest {
+  model?: string;
+  agent_id?: string;
+  messages: ChatMessage[];
+  tools_to_use?: string[];
+  auto_tool_selection?: boolean;
+  file_uuids?: string[];
+}
 
-    // Prepend system prompt if set.
-    const sys = useSettings.getState().systemPrompt?.trim();
-    const base = useChat.getState().messages
-      .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
-      .map(({ role, content }) => ({ role, content }));
-    const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
+export type StreamStatus =
+  | { kind: 'thinking'; text?: string }
+  | { kind: 'tool'; name?: string; text?: string }
+  | { kind: 'summary'; text?: string }
+  | { kind: 'writing' };
 
-    setStreamStatus({ kind: 'thinking' });
-await client.streamChat(
-  {
-    ...(models.find(m => m.id === selectedModel)?.kind === 'agent'
-  ? { agent_id: selectedModel }
-  : { model: selectedModel }),
-    messages: history,
-    auto_tool_selection: autoTools,
-    tools_to_use: autoTools ? undefined : activeTools,
-    file_uuids: attachedFileIds,
-  },
-  {
-    onToken: (delta) => appendAssistantDelta(delta),
-    onStatus: (s) => setStreamStatus(s),
-    onDone: () => {
-      finalizeAssistant();
-      setStreamStatus(null);
-      setBusy(false);
-    },
-    onError: (err) => {
-      appendAssistantDelta(`\n\n_Error: ${err.message}_`);
-      finalizeAssistant();
-      setStreamStatus(null);
-      setBusy(false);
-    },
-  },
-);
-  };
-
-  const handleNewChat = () => {
-  // If the current conversation is already empty and untouched,
-  // reuse it instead of creating yet another blank thread.
-  const active = useConversations.getState().getActive();
-  if (active && active.messages.length === 0) {
-    // Nothing to do; user is already looking at a fresh chat.
-    Haptics.selectionAsync().catch(() => {});
-    return;
-  }
-  newConversation();
-  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+export type StreamHandlers = {
+  onToken: (token: string) => void;
+  onStatus?: (status: StreamStatus) => void;
+  onDone: () => void;
+  onError: (err: Error) => void;
 };
 
-  const pickAndUpload = async () => {
-    console.log('[pickAndUpload] invoked');
-    const client = getClient();
-    if (!client) return;
-    try {
-      const res = await DocumentPicker.getDocumentAsync({
-        multiple: false,
-        copyToCacheDirectory: true,
-      });
-      if (res.canceled || !res.assets?.[0]) return;
-      const asset = res.assets[0];
-      setUploading(true);
-      const uuid = await client.uploadFile({
-        uri: asset.uri,
-        name: asset.name ?? 'file',
-        type: asset.mimeType ?? 'application/octet-stream',
-      });
-      await addAttachedFileId(uuid);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    } catch (e: any) {
-      Alert.alert('Upload failed', e?.message ?? 'Unknown error');
-    } finally {
-      setUploading(false);
+export class HatzClient {
+  constructor(private apiKey: string) {}
+
+  private headers(extra: Record<string, string> = {}) {
+    return {
+      'X-API-Key': this.apiKey,
+      Accept: 'application/json',
+      ...extra,
+    };
+  }
+
+  // ---------- Models ----------
+  async listModels(): Promise<ModelInfo[]> {
+    const res = await fetch(`${BASE_URL}/chat/models`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`listModels failed: ${res.status}`);
+    const data = await res.json();
+    const arr: any[] = Array.isArray(data) ? data : data.data ?? data.models ?? [];
+    return arr.map((m) => ({
+      id: m.name ?? m.id,
+      label: m.display_name ?? m.label ?? m.name ?? m.id,
+      provider: m.developer ?? m.provider ?? m.owner ?? 'Other',
+      kind: 'model' as const,
+      raw: m,
+    }));
+  }
+
+  // ---------- Agents ----------
+  async listAgents(): Promise<ModelInfo[]> {
+    const res = await fetch(`${BASE_URL}/chat/agents`, { headers: this.headers() });
+    if (!res.ok) {
+      console.warn(`listAgents failed: ${res.status}`);
+      return [];
     }
-  };
+    const data = await res.json();
+    const arr: any[] = Array.isArray(data) ? data : data.data ?? data.agents ?? [];
+    return arr.map((a) => ({
+      id: a.id ?? a.agent_id ?? a.name,
+      label: a.display_name ?? a.name ?? a.id,
+      provider: a.developer ?? a.provider ?? 'My Agents',
+      kind: 'agent' as const,
+      raw: a,
+    }));
+  }
 
-  const toggleTool = (id: string) => {
-    const next = activeTools.includes(id)
-      ? activeTools.filter((t) => t !== id)
-      : [...activeTools, id];
-    setActiveTools(next);
-  };
+  // ---------- Apps (legacy AppInfo shape) ----------
+  async listApps(): Promise<AppInfo[]> {
+    const res = await fetch(`${BASE_URL}/app/list`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`listApps failed: ${res.status}`);
+    const data = await res.json();
+    const arr: any[] = Array.isArray(data) ? data : data.data ?? data.apps ?? [];
+    return arr.map((a) => this.normalizeApp(a));
+  }
 
-  if (!apiKey || !selectedModel) {
+  async getApp(appId: string): Promise<AppInfo | null> {
+    const res = await fetch(`${BASE_URL}/app/${appId}`, { headers: this.headers() });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return this.normalizeApp(data);
+  }
+
+  private normalizeApp(a: any): AppInfo {
+    const inputsRaw: any[] =
+      a.inputs ?? a.input_schema ?? a.user_inputs ?? a.variables ?? [];
+    const inputs: AppInput[] = inputsRaw
+      .map((i: any) => ({
+        name: i.variable_name ?? i.name ?? i.key ?? i.id,
+        label: i.display_name ?? i.label ?? i.name,
+        type: i.variable_type ?? i.type,
+        required: i.required ?? false,
+        options: i.options ?? i.choices,
+        placeholder: i.placeholder ?? i.description,
+      }))
+      .filter((i: AppInput) => !!i.name);
+
+    return {
+      id: a.id ?? a.app_id ?? a.uuid,
+      name: a.name ?? a.display_name ?? 'Untitled App',
+      description: a.description ?? a.summary,
+      inputs,
+      raw: a,
+    };
+  }
+
+  async runApp(opts: {
+    appId: string;
+    inputs: Record<string, any>;
+    model?: string;
+    fileUuids?: string[];
+  }): Promise<string> {
+    const body: Record<string, any> = { inputs: opts.inputs, stream: false };
+    if (opts.model) body.model = opts.model;
+    if (opts.fileUuids?.length) body.file_uuids = opts.fileUuids;
+    const res = await expoFetch(`${BASE_URL}/app/${opts.appId}/query`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`runApp ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const data = await res.json();
     return (
-      <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
-        <View style={styles.emptyWrap}>
-          <View style={[styles.emptyIcon, { backgroundColor: theme.colors.primarySoft }]}>
-            <Ionicons name="sparkles" size={32} color={theme.colors.primary} />
-          </View>
-          <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>Welcome to Hatz Chat</Text>
-          <Text style={[styles.emptySub, { color: theme.colors.textMuted }]}>
-            Add your API key and pick a model to get started.
-          </Text>
-          <Link href="/settings" asChild>
-            <Pressable style={[styles.primaryBtn, { backgroundColor: theme.colors.primary }]}>
-              <Ionicons name="settings-outline" size={18} color={theme.colors.primaryText} />
-              <Text style={[styles.primaryBtnText, { color: theme.colors.primaryText }]}>Open Settings</Text>
-            </Pressable>
-          </Link>
-        </View>
-      </SafeAreaView>
+      data?.content ??
+      data?.message ??
+      data?.output ??
+      data?.choices?.[0]?.message?.content ??
+      JSON.stringify(data, null, 2)
     );
   }
 
-  return (
-    <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
-      {/* Two-row header */}
-      <View style={[styles.header, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-  <View style={{ flex: 1 }}>
-    <Pressable onPress={() => setDrawerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
-      <Text style={styles.headerTitle}>{activeTitle || 'Chat'}</Text>
-      <Text style={[styles.headerSub, { color: theme.colors.textMuted }]} numberOfLines={1}>
-        {currentTarget?.label ?? 'Select a model'}
-      </Text>
-    </Pressable>
-  </View>
+  // ---------- Apps / Workflows (raw AppItem shape) ----------
+  async listAppsRaw(opts?: {
+    name?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<AppItem[]> {
+    const params = new URLSearchParams();
+    if (opts?.name) params.set('name', opts.name);
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    const url = `${BASE_URL}/app/list${qs ? `?${qs}` : ''}`;
+    const res = await fetch(url, { headers: this.headers() });
+    if (!res.ok) throw new Error(`listAppsRaw failed: ${res.status}`);
+    const data = await res.json();
+    const arr: any[] = Array.isArray(data) ? data : data.data ?? data.apps ?? [];
+    return arr as AppItem[];
+  }
 
-  <Link href={'/apps' as any} asChild>
-    <Pressable style={styles.iconBtn} hitSlop={8}>
-      <Ionicons name="apps-outline" size={22} color={theme.colors.text} />
-    </Pressable>
-  </Link>
+  /** Full schema for an app. Hatz's GET /v1/app/{id} 500s for workflow IDs,
+   *  so on failure we fall back to scanning /v1/app/list. */
+  async getAppRaw(appId: string): Promise<AppItem> {
+    const url = `${BASE_URL}/app/${appId}`;
+    const res = await fetch(url, { headers: this.headers() });
+    if (res.ok) return (await res.json()) as AppItem;
 
-  <Pressable onPress={handleNewChat} style={styles.iconBtn} hitSlop={8}>
-    <Ionicons name="create-outline" size={22} color={theme.colors.text} />
-  </Pressable>
+    const body = await res.text().catch(() => '<no body>');
+    console.warn('[getAppRaw] primary failed, falling back to list', {
+      url,
+      status: res.status,
+      body: body.slice(0, 200),
+    });
 
-  <Link href="/settings" asChild>
-    <Pressable style={styles.iconBtn} hitSlop={8}>
-      <Ionicons name="settings-outline" size={22} color={theme.colors.text} />
-    </Pressable>
-  </Link>
-</View>
+    const list = await this.listAppsRaw({ limit: 500 });
+    const match = list.find((a: any) => (a.id ?? a.app_id ?? a.uuid) === appId);
+    if (!match) throw new Error(`getAppRaw ${res.status}: not found in list fallback`);
+    return match;
+  }
 
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <FlatList
-          ref={listRef}
-          data={messages}
-          keyExtractor={(_, i) => String(i)}
-          contentContainerStyle={{ padding: spacing.md, paddingBottom: spacing.lg }}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-          ListEmptyComponent={<View />}
-          renderItem={({ item }) => {
-            const isUser = item.role === 'user';
-            if (!isUser) {
-              return (
-                <View style={styles.assistantWrap}>
-                  <Markdown
-                    style={{
-                      body: { color: theme.colors.assistantText, fontSize: fontSize.md, lineHeight: 26 },
-                      paragraph: { marginTop: 0, marginBottom: spacing.md },
-                      code_inline: { backgroundColor: theme.colors.surfaceAlt, color: theme.colors.text, paddingHorizontal: 4, borderRadius: 4 },
-                      fence: { backgroundColor: theme.colors.surfaceAlt, color: theme.colors.text, padding: spacing.md, borderRadius: radii.md },
-                      link: { color: theme.colors.primary },
-                    }}
-                  >
-                    {item.content || '…'}
-                  </Markdown>
-                </View>
-              );
+  /** Workflow schemas: always resolve via /v1/app/list (no single-fetch endpoint). */
+  async getWorkflowRaw(appId: string): Promise<AppItem> {
+    const list = await this.listAppsRaw({ limit: 500 });
+    const match = list.find((a: any) => (a.id ?? a.app_id ?? a.uuid) === appId);
+    if (!match) throw new Error(`getWorkflowRaw: workflow ${appId} not found`);
+    return match;
+  }
+
+  // ---------- Workflows ----------
+  async runWorkflow(
+    appId: string,
+    inputs: Record<string, unknown>,
+    isDraftApp = false,
+  ): Promise<RunWorkflowResponse> {
+    const res = await expoFetch(`${BASE_URL}/workflows/run`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ app_id: appId, inputs, is_draft_app: isDraftApp }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`runWorkflow ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return (await res.json()) as RunWorkflowResponse;
+  }
+
+  async getJobStatus(jobId: string): Promise<WorkflowJob> {
+    const res = await fetch(`${BASE_URL}/workflows/${jobId}`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`getJobStatus ${res.status}`);
+    return (await res.json()) as WorkflowJob;
+  }
+
+  async getWorkflowPresignedUrl(
+    jobId: string,
+    stepId: string,
+    expiresIn = 3600,
+  ): Promise<PresignedUrlResponse> {
+    const res = await expoFetch(`${BASE_URL}/workflows/presigned-url`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ job_id: jobId, step_id: stepId, expires_in: expiresIn }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`getWorkflowPresignedUrl ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return (await res.json()) as PresignedUrlResponse;
+  }
+
+  // ---------- File upload ----------
+  async uploadFile(file: { uri: string; name: string; type: string }): Promise<string> {
+    const form = new FormData();
+    form.append('file', {
+      uri: file.uri,
+      name: file.name,
+      type: file.type,
+    } as any);
+
+    const res = await fetch(`${BASE_URL}/files/upload`, {
+      method: 'POST',
+      headers: this.headers(), // Do NOT set Content-Type; let fetch set the boundary.
+      body: form,
+    });
+
+    const headerDump: Record<string, string> = {};
+    res.headers.forEach((v, k) => { headerDump[k] = v; });
+    const text = await res.text();
+    console.log('[HatzClient.uploadFile] status', res.status);
+    console.log('[HatzClient.uploadFile] headers', headerDump);
+    console.log('[HatzClient.uploadFile] body', text);
+
+    if (!res.ok) throw new Error(`uploadFile ${res.status}: ${text.slice(0, 200)}`);
+
+    const locationHdr =
+      headerDump['location'] || headerDump['x-file-id'] || headerDump['x-file-uuid'];
+    if (locationHdr) {
+      const parts = locationHdr.split('/').filter(Boolean);
+      return parts[parts.length - 1];
+    }
+    if (text) {
+      try {
+        const json = JSON.parse(text);
+        const uuid =
+          json?.file_uuid ??
+          json?.uuid ??
+          json?.id ??
+          json?.data?.id ??
+          json?.data?.file_uuid;
+        if (uuid) return uuid;
+      } catch { /* not JSON */ }
+    }
+    throw new Error('uploadFile: could not locate file UUID in response. See console logs.');
+  }
+
+  // ---------- Chat streaming ----------
+  async streamChat(req: StreamChatRequest, handlers: StreamHandlers): Promise<void> {
+    try {
+      const body = {
+        ...(req.agent_id ? { agent_id: req.agent_id } : { model: req.model }),
+        messages: req.messages,
+        stream: true,
+        ...(req.tools_to_use?.length ? { tools_to_use: req.tools_to_use } : {}),
+        ...(typeof req.auto_tool_selection === 'boolean'
+          ? { auto_tool_selection: req.auto_tool_selection }
+          : {}),
+        ...(req.file_uuids?.length ? { file_uuids: req.file_uuids } : {}),
+      };
+
+      const res = await expoFetch(`${BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: this.headers({
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        }),
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`streamChat ${res.status}: ${text.slice(0, 200)}`);
+      }
+
+      const reader = (res.body as any).getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let inThinking = false;
+      let sawContent = false;
+
+      const handleContent = (msg: string) => {
+        let text = msg;
+        while (text.length > 0) {
+          if (inThinking) {
+            const end = text.indexOf('</details>');
+            if (end === -1) {
+              const inner = text.replace(/<[^>]+>/g, '').trim();
+              if (inner) handlers.onStatus?.({ kind: 'thinking', text: inner.slice(-120) });
+              text = '';
+            } else {
+              const inner = text.slice(0, end).replace(/<[^>]+>/g, '').trim();
+              if (inner) handlers.onStatus?.({ kind: 'thinking', text: inner.slice(-120) });
+              text = text.slice(end + '</details>'.length);
+              inThinking = false;
             }
-            return (
-              <View style={[styles.userBubble, { backgroundColor: theme.colors.bubbleUser }]}>
-                <Text style={{ color: theme.colors.bubbleUserText, fontSize: fontSize.md, lineHeight: 22 }}>
-                  {item.content}
-                </Text>
-              </View>
-            );
-          }}
-        />
-        {busy && streamStatus && streamStatus.kind !== 'writing' ? (
-  <StatusBubble status={streamStatus} />
-) : null}
+          } else {
+            const start = text.indexOf('<details>');
+            if (start === -1) {
+              if (text.length) {
+                if (!sawContent) handlers.onStatus?.({ kind: 'writing' });
+                sawContent = true;
+                handlers.onToken(text);
+              }
+              text = '';
+            } else {
+              const before = text.slice(0, start);
+              if (before.length) {
+                if (!sawContent) handlers.onStatus?.({ kind: 'writing' });
+                sawContent = true;
+                handlers.onToken(before);
+              }
+              text = text.slice(start + '<details>'.length);
+              inThinking = true;
+            }
+          }
+        }
+      };
 
-        {/* Attached files strip */}
-        {attachedFileIds.length > 0 && (
-          <View style={[styles.filesStrip, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>
-              {attachedFileIds.map((id) => (
-                <View key={id} style={[styles.fileChip, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
-                  <Ionicons name="document-outline" size={14} color={theme.colors.textMuted} />
-                  <Text numberOfLines={1} style={{ color: theme.colors.text, fontSize: fontSize.xs, maxWidth: 120 }}>
-                    {id.slice(0, 8)}…
-                  </Text>
-                  <Pressable onPress={() => removeAttachedFileId(id)} hitSlop={8}>
-                    <Ionicons name="close" size={14} color={theme.colors.textMuted} />
-                  </Pressable>
-                </View>
-              ))}
-            </ScrollView>
-          </View>
-        )}
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
 
-        <View style={[
-  styles.composer,
-  {
-    backgroundColor: theme.colors.surface,
-    borderColor: theme.colors.border,
-    paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.sm,
-  },
-]}>
-  {/* Row 1: input + send */}
-  <View style={styles.inputRow}>
-    <TextInput
-      style={[styles.input, { color: theme.colors.text, flex: 1 }]}
-      placeholder="Message"
-      placeholderTextColor={theme.colors.textMuted}
-      value={input}
-      onChangeText={setInput}
-      multiline
-    />
-    <Pressable
-      onPress={send}
-      disabled={!canSend}
-      style={[styles.sendBtn, { backgroundColor: theme.colors.primary, opacity: canSend ? 1 : 0.5 }]}
-    >
-      {busy ? (
-        <ActivityIndicator color={theme.colors.primaryText} />
-      ) : (
-        <Ionicons name="arrow-up" size={20} color={theme.colors.primaryText} />
-      )}
-    </Pressable>
-  </View>
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
-  {/* Row 2: chips */}
-  <View style={styles.dock}>
-    <Pressable onPress={pickAndUpload} style={styles.dockIcon} hitSlop={8} disabled={uploading}>
-      {uploading ? (
-        <ActivityIndicator size="small" color={theme.colors.text} />
-      ) : (
-        <Ionicons name="add" size={22} color={theme.colors.text} />
-      )}
-    </Pressable>
+        for (const rawLine of lines) {
+          const payload = rawLine.trim();
+          if (!payload || payload === '[DONE]') continue;
 
-    {/* Auto tools toggle */}
-    <Pressable
-      onPress={() => setAutoTools(!autoTools)}
-      style={[styles.dockChip, {
-        backgroundColor: autoTools ? theme.colors.primarySoft : 'transparent',
-        borderColor: theme.colors.border,
-      }]}
-      hitSlop={6}
-    >
-      <Ionicons name="flash" size={14} color={autoTools ? theme.colors.primary : theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: autoTools ? theme.colors.text : theme.colors.textMuted }]}>Auto</Text>
-    </Pressable>
+          try {
+            const evt = JSON.parse(payload);
+            const type = evt?.type;
+            const msg = typeof evt?.message === 'string' ? evt.message : '';
 
-    {/* Tools dropdown (disabled when auto is on) */}
-    <Pressable
-      onPress={() => !autoTools && setToolsPickerOpen(true)}
-      disabled={autoTools}
-      style={[styles.dockChip, {
-        borderColor: theme.colors.border,
-        opacity: autoTools ? 0.4 : 1,
-        backgroundColor: !autoTools && activeTools.length > 0 ? theme.colors.primarySoft : 'transparent',
-      }]}
-      hitSlop={6}
-    >
-      <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: theme.colors.textMuted }]}>
-        {activeTools.length > 0 && !autoTools ? `Tools · ${activeTools.length}` : 'Tools'}
-      </Text>
-      <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
-    </Pressable>
+            if (type === 'content' && msg) {
+              handleContent(msg);
+              continue;
+            }
+            if (type === 'thinking') {
+              handlers.onStatus?.({ kind: 'thinking', text: msg });
+              continue;
+            }
+            if (type === 'summary') {
+              handlers.onStatus?.({ kind: 'summary', text: msg });
+              continue;
+            }
+            if (type === 'tool_call' || type === 'tool' || type === 'tool_use') {
+              handlers.onStatus?.({
+                kind: 'tool',
+                name: evt?.name ?? evt?.tool ?? undefined,
+                text: msg,
+              });
+              continue;
+            }
 
-    {/* Model / target dropdown */}
-    <Pressable
-      onPress={() => setTargetPickerOpen(true)}
-      style={[styles.dockChip, { borderColor: theme.colors.border }]}
-      hitSlop={6}
-    >
-      <Ionicons name="cube-outline" size={14} color={theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: theme.colors.text }]}>Models</Text>
-      <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
-    </Pressable>
-  </View>
-</View>
-      </KeyboardAvoidingView>
+            const delta = evt?.choices?.[0]?.delta?.content;
+            if (typeof delta === 'string') {
+              if (!sawContent) handlers.onStatus?.({ kind: 'writing' });
+              sawContent = true;
+              handlers.onToken(delta);
+            }
+          } catch {
+            // ignore non-JSON lines
+          }
+        }
+      }
 
-      {/* ---------- Target picker modal ---------- */}
-      <Modal visible={targetPickerOpen} transparent animationType="slide" onRequestClose={() => setTargetPickerOpen(false)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setTargetPickerOpen(false)}>
-          <Pressable
-            style={[styles.modalSheet, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
-            onPress={(e) => e.stopPropagation()}
-          >
-            <View style={[styles.modalHandle, { backgroundColor: theme.colors.border }]} />
-            <Text style={[styles.modalTitle, { color: theme.colors.text }]}>Select Model or Agent</Text>
-            <ScrollView style={{ maxHeight: 520 }}>
-              {getGroupedTargets().map((group) => (
-                <View key={group.title} style={{ marginBottom: spacing.md }}>
-                  <Text style={[styles.groupHeader, { color: theme.colors.textMuted }]}>{group.title}</Text>
-                  {group.items.map((m) => {
-                    const active = m.id === selectedModel;
-                    return (
-                      <Pressable
-                        key={m.id}
-                        onPress={() => { setSelectedModel(m.id); setTargetPickerOpen(false); }}
-                        style={[styles.modelRow, {
-                          backgroundColor: active ? theme.colors.primarySoft : 'transparent',
-                          borderColor: theme.colors.border,
-                        }]}
-                      >
-                        <Ionicons
-                          name={m.kind === 'agent' ? 'person-circle-outline' : 'cube-outline'}
-                          size={18}
-                          color={theme.colors.textMuted}
-                          style={{ marginRight: spacing.sm }}
-                        />
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ color: theme.colors.text, fontSize: fontSize.md, fontWeight: '600' }}>
-                            {m.label}
-                          </Text>
-                          {m.provider && m.kind === 'model' ? (
-                            <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs, marginTop: 2 }}>
-                              {m.provider}
-                            </Text>
-                          ) : null}
-                        </View>
-                        {active ? <Ionicons name="checkmark" size={18} color={theme.colors.primary} /> : null}
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              ))}
-            </ScrollView>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      {/* ---------- Tools picker modal ---------- */}
-      <Modal visible={toolsPickerOpen} transparent animationType="slide" onRequestClose={() => setToolsPickerOpen(false)}>
-        <Pressable style={styles.modalBackdrop} onPress={() => setToolsPickerOpen(false)}>
-          <Pressable
-            style={[styles.modalSheet, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
-            onPress={(e) => e.stopPropagation()}
-          >
-            <View style={[styles.modalHandle, { backgroundColor: theme.colors.border }]} />
-            <Text style={[styles.modalTitle, { color: theme.colors.text }]}>Tools</Text>
-            <ScrollView style={{ maxHeight: 520 }}>
-              {groupedTools().map(({ category, tools }) => (
-                <View key={category} style={{ marginBottom: spacing.md }}>
-                  <Text style={[styles.groupHeader, { color: theme.colors.textMuted }]}>{category}</Text>
-                  {tools.map((t: ToolDef) => {
-                    const on = activeTools.includes(t.id);
-                    return (
-                      <Pressable
-                        key={t.id}
-                        onPress={() => toggleTool(t.id)}
-                        style={[styles.modelRow, {
-                          backgroundColor: on ? theme.colors.primarySoft : 'transparent',
-                          borderColor: theme.colors.border,
-                        }]}
-                      >
-                        <Ionicons
-                          name={(t.icon as any) ?? 'construct-outline'}
-                          size={18}
-                          color={on ? theme.colors.primary : theme.colors.textMuted}
-                          style={{ marginRight: spacing.sm }}
-                        />
-                        <Text style={{ flex: 1, color: theme.colors.text, fontSize: fontSize.md, fontWeight: '600' }}>
-                          {t.label}
-                        </Text>
-                        {on ? <Ionicons name="checkmark" size={18} color={theme.colors.primary} /> : null}
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              ))}
-            </ScrollView>
-            <Pressable
-              onPress={() => setToolsPickerOpen(false)}
-              style={[styles.primaryBtn, { backgroundColor: theme.colors.primary, alignSelf: 'center', marginTop: spacing.sm }]}
-            >
-              <Text style={[styles.primaryBtnText, { color: theme.colors.primaryText }]}>Done</Text>
-            </Pressable>
-          </Pressable>
-        </Pressable>
-      </Modal>
-
-      <ConversationsDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
-    </SafeAreaView>
-  );
+      handlers.onDone();
+    } catch (err: any) {
+      handlers.onError(err instanceof Error ? err : new Error(String(err)));
+    }
+  }
 }
-
-const styles = StyleSheet.create({
-  safe: { flex: 1 },
-  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
-  emptyIcon: {
-    width: 72, height: 72, borderRadius: radii.pill,
-    alignItems: 'center', justifyContent: 'center', marginBottom: spacing.lg,
-  },
-  emptyTitle: { fontSize: fontSize.xxl, fontWeight: '700', marginBottom: spacing.sm },
-  emptySub: { fontSize: fontSize.md, textAlign: 'center', marginBottom: spacing.xl },
-  primaryBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    paddingHorizontal: spacing.xl, paddingVertical: spacing.md,
-    borderRadius: radii.pill,
-  },
-  primaryBtnText: { fontSize: fontSize.md, fontWeight: '600' },
-
-  header: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerTitleRow: { flexDirection: 'column', alignItems: 'flex-start' },
-  headerTitle: { fontSize: fontSize.lg, fontWeight: '700', color: '#fff' },
-  headerSub: { fontSize: fontSize.xs, marginTop: 2 },
-  iconBtn: { padding: spacing.sm, marginLeft: spacing.xs },
-
-  assistantWrap: { paddingHorizontal: spacing.xs, paddingVertical: spacing.sm, marginBottom: spacing.sm },
-  userBubble: {
-    alignSelf: 'flex-end',
-    paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
-    borderRadius: radii.xl,
-    marginVertical: spacing.xs, maxWidth: '85%',
-  },
-
-  filesStrip: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
-  },
-  fileChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: spacing.sm, paddingVertical: 6,
-    borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth,
-  },
-
-  composer: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.md,
-    gap: spacing.sm,
-  },
-  input: {
-    minHeight: 40, maxHeight: 140,
-    paddingHorizontal: spacing.sm, paddingVertical: spacing.sm,
-    fontSize: fontSize.md,
-  },
-  inputRow: {
-  flexDirection: 'row',
-  alignItems: 'flex-end',
-  gap: spacing.sm,
-  marginBottom: spacing.sm,
-},
-  dock: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  gap: spacing.sm,
-  flexWrap: 'wrap',
-},
-  dockIcon: {
-    width: 34, height: 34, borderRadius: radii.pill,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  dockChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: spacing.sm + 2, paddingVertical: 6,
-    borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth,
-  },
-  dockChipText: { fontSize: fontSize.xs, fontWeight: '600' },
-  sendBtn: {
-    width: 38, height: 38, borderRadius: radii.pill,
-    alignItems: 'center', justifyContent: 'center',
-  },
-
-  modalBackdrop: {
-    flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end',
-  },
-  modalSheet: {
-    borderTopLeftRadius: radii.xl, borderTopRightRadius: radii.xl,
-    padding: spacing.lg, borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  modalHandle: {
-    width: 40, height: 4, borderRadius: 2,
-    alignSelf: 'center', marginBottom: spacing.md,
-  },
-  modalTitle: { fontSize: fontSize.lg, fontWeight: '700', marginBottom: spacing.md },
-  groupHeader: {
-    fontSize: fontSize.xs, fontWeight: '700', textTransform: 'uppercase',
-    letterSpacing: 1, marginBottom: spacing.xs, paddingHorizontal: spacing.xs,
-  },
-  modelRow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: spacing.md, paddingVertical: spacing.md,
-    borderRadius: radii.md, borderWidth: StyleSheet.hairlineWidth,
-    marginBottom: spacing.sm,
-  },
-});

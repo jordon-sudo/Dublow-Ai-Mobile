@@ -106,7 +106,7 @@ export class HatzClient {
     }));
   }
 
-  // ---------- Apps (legacy AppInfo shape — keep for existing screens) ----------
+  // ---------- Apps (legacy AppInfo shape) ----------
   async listApps(): Promise<AppInfo[]> {
     const res = await fetch(`${BASE_URL}/app/list`, { headers: this.headers() });
     if (!res.ok) throw new Error(`listApps failed: ${res.status}`);
@@ -173,12 +173,7 @@ export class HatzClient {
     );
   }
 
-  // ---------- Apps / Workflows (raw AppItem shape — new screens) ----------
-  /**
-   * List apps and workflows with full schema. Supports server-side name
-   * filter and pagination. Returns the raw AppItem union used by the
-   * Apps/Workflows tabbed screen.
-   */
+  // ---------- Apps / Workflows (raw AppItem shape) ----------
   async listAppsRaw(opts?: {
     name?: string;
     limit?: number;
@@ -197,13 +192,41 @@ export class HatzClient {
     return arr as AppItem[];
   }
 
-  /** Full schema (including user_inputs) for a single app or workflow. */
-  async getAppRaw(appId: string): Promise<AppItem> {
-    const res = await fetch(`${BASE_URL}/app/${appId}`, { headers: this.headers() });
-    if (!res.ok) throw new Error(`getAppRaw ${res.status}`);
+ /** Full schema (including user_inputs) for a single app or workflow.
+ *  Hatz's GET /v1/app/{id} currently 500s for some workflow IDs, so on
+ *  failure we fall back to scanning /v1/app/list and matching by ID. */
+async getAppRaw(appId: string): Promise<AppItem> {
+  const url = `${BASE_URL}/app/${appId}`;
+  const res = await fetch(url, { headers: this.headers() });
+
+  if (res.ok) {
     return (await res.json()) as AppItem;
   }
 
+  // Log the original failure for diagnostics.
+  const body = await res.text().catch(() => '<no body>');
+  console.warn('[getAppRaw] primary failed, falling back to list', {
+    url,
+    status: res.status,
+    body: body.slice(0, 200),
+  });
+
+  // Fallback: scan the list endpoint.
+  const list = await this.listAppsRaw({ limit: 500 });
+  const match = list.find((a: any) => (a.id ?? a.app_id ?? a.uuid) === appId);
+  if (!match) {
+    throw new Error(`getAppRaw ${res.status}: not found in list fallback`);
+  }
+  return match;
+}
+/** Fetch workflow schema by ID. Hatz has no single-fetch workflow endpoint,
+ *  so we resolve via /v1/app/list which returns the full AppItem shape. */
+async getWorkflowRaw(appId: string): Promise<AppItem> {
+  const list = await this.listAppsRaw({ limit: 500 });
+  const match = list.find((a: any) => (a.id ?? a.app_id ?? a.uuid) === appId);
+  if (!match) throw new Error(`getWorkflowRaw: workflow ${appId} not found`);
+  return match;
+}
   // ---------- Workflows ----------
   async runWorkflow(
     appId: string,
@@ -244,17 +267,8 @@ export class HatzClient {
     }
     return (await res.json()) as PresignedUrlResponse;
   }
-
- // ---------- File upload ----------
-  /**
-   * Upload a file. Pass scopeType='workflow' and scopeId=<app_id> when
-   * uploading for a workflow input. Omit both for the legacy behavior
-   * used by the chat composer.
-   */
-  async uploadFile(
-    file: { uri: string; name: string; type: string },
-    opts?: { scopeType?: 'workflow' | 'agent' | 'app'; scopeId?: string },
-  ): Promise<string> {
+  // ---------- File upload ----------
+  async uploadFile(file: { uri: string; name: string; type: string }): Promise<string> {
     const form = new FormData();
     form.append('file', {
       uri: file.uri,
@@ -262,19 +276,14 @@ export class HatzClient {
       type: file.type,
     } as any);
 
-    if (opts?.scopeType) form.append('scope_type', opts.scopeType);
-    if (opts?.scopeId) form.append('scope_id', opts.scopeId);
-
     const res = await fetch(`${BASE_URL}/files/upload`, {
       method: 'POST',
-      headers: this.headers(), // Do NOT set Content-Type; let fetch set the boundary.
+      headers: this.headers(),
       body: form,
     });
 
     const headerDump: Record<string, string> = {};
-    res.headers.forEach((v, k) => {
-      headerDump[k] = v;
-    });
+    res.headers.forEach((v, k) => { headerDump[k] = v; });
     const text = await res.text();
     console.log('[HatzClient.uploadFile] status', res.status);
     console.log('[HatzClient.uploadFile] headers', headerDump);
@@ -282,11 +291,8 @@ export class HatzClient {
 
     if (!res.ok) throw new Error(`uploadFile ${res.status}: ${text.slice(0, 200)}`);
 
-    // Try multiple locations for the UUID, in priority order.
     const locationHdr =
-      headerDump['location'] ||
-      headerDump['x-file-id'] ||
-      headerDump['x-file-uuid'];
+      headerDump['location'] || headerDump['x-file-id'] || headerDump['x-file-uuid'];
     if (locationHdr) {
       const parts = locationHdr.split('/').filter(Boolean);
       return parts[parts.length - 1];
@@ -301,9 +307,7 @@ export class HatzClient {
           json?.data?.id ??
           json?.data?.file_uuid;
         if (uuid) return uuid;
-      } catch {
-        /* not JSON */
-      }
+      } catch { /* not JSON */ }
     }
     throw new Error('uploadFile: could not locate file UUID in response. See console logs.');
   }
@@ -346,7 +350,7 @@ export class HatzClient {
         let text = msg;
         while (text.length > 0) {
           if (inThinking) {
-            const end = text.indexOf('</thinking>');
+            const end = text.indexOf('</details>');
             if (end === -1) {
               const inner = text.replace(/<[^>]+>/g, '').trim();
               if (inner) handlers.onStatus?.({ kind: 'thinking', text: inner.slice(-120) });
@@ -354,11 +358,11 @@ export class HatzClient {
             } else {
               const inner = text.slice(0, end).replace(/<[^>]+>/g, '').trim();
               if (inner) handlers.onStatus?.({ kind: 'thinking', text: inner.slice(-120) });
-              text = text.slice(end + '</thinking>'.length);
+              text = text.slice(end + '</details>'.length);
               inThinking = false;
             }
           } else {
-            const start = text.indexOf('<thinking>');
+            const start = text.indexOf('<details>');
             if (start === -1) {
               if (text.length) {
                 if (!sawContent) handlers.onStatus?.({ kind: 'writing' });
@@ -373,7 +377,7 @@ export class HatzClient {
                 sawContent = true;
                 handlers.onToken(before);
               }
-              text = text.slice(start + '<thinking>'.length);
+              text = text.slice(start + '<details>'.length);
               inThinking = true;
             }
           }

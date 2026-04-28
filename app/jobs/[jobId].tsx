@@ -1,6 +1,6 @@
 // app/jobs/[jobId].tsx
-// Live workflow job screen. Polls status every 3s until terminal,
-// renders step outputs, opens presigned URLs for file outputs.
+// Job detail screen. Handles both real workflow jobs (polls server) and
+// client-side app pseudo-jobs (reads output from local store).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
@@ -47,15 +47,16 @@ export default function JobScreen() {
   const [error, setError] = useState<string | null>(null);
   const [initialLoading, setInitialLoading] = useState(!trackedJob?.last_snapshot);
 
-  // Ref so the interval callback always sees the latest values.
   const pollingRef = useRef(true);
+
+  const isAppJob = trackedJob ? !trackedJob.is_workflow : false;
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
 
   const poll = useCallback(async () => {
-    if (!client || !jobId) return;
+    if (!client || !jobId || isAppJob) return;
     try {
       const fresh = await client.getJobStatus(String(jobId));
       setSnapshot(fresh);
@@ -69,9 +70,13 @@ export default function JobScreen() {
     } finally {
       setInitialLoading(false);
     }
-  }, [client, jobId, updateJob]);
+  }, [client, jobId, updateJob, isAppJob]);
 
   useEffect(() => {
+    if (isAppJob) {
+      setInitialLoading(false);
+      return;
+    }
     pollingRef.current = true;
     void poll();
     const timer = setInterval(() => {
@@ -81,7 +86,7 @@ export default function JobScreen() {
       pollingRef.current = false;
       clearInterval(timer);
     };
-  }, [poll]);
+  }, [poll, isAppJob]);
 
   const statusColor = (s: string | undefined) => {
     if (s === 'complete') return theme.colors.success;
@@ -89,7 +94,7 @@ export default function JobScreen() {
     return theme.colors.textMuted;
   };
 
-  const headerTitle = trackedJob?.app_name ?? 'Workflow Job';
+  const headerTitle = trackedJob?.app_name ?? 'Job';
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: theme.colors.bg }]} edges={['top']}>
@@ -115,11 +120,16 @@ export default function JobScreen() {
           <View style={styles.statusRow}>
             <Text style={[styles.statusLabel, { color: theme.colors.textMuted }]}>Status</Text>
             <View style={styles.statusRight}>
-              {!isTerminalStatus(snapshot?.status) ? (
+              {!isTerminalStatus(trackedJob?.status ?? snapshot?.status) ? (
                 <ActivityIndicator size="small" color={theme.colors.primary} />
               ) : null}
-              <Text style={[styles.statusValue, { color: statusColor(snapshot?.status) }]}>
-                {(snapshot?.status ?? trackedJob?.status ?? 'pending').toString()}
+              <Text
+                style={[
+                  styles.statusValue,
+                  { color: statusColor(trackedJob?.status ?? snapshot?.status) },
+                ]}
+              >
+                {(trackedJob?.status ?? snapshot?.status ?? 'pending').toString()}
               </Text>
             </View>
           </View>
@@ -128,7 +138,9 @@ export default function JobScreen() {
           </Text>
         </View>
 
-        {initialLoading ? (
+        {isAppJob && trackedJob ? (
+          <AppOutputBlock job={trackedJob} />
+        ) : initialLoading ? (
           <View style={styles.center}>
             <ActivityIndicator color={theme.colors.primary} />
           </View>
@@ -150,6 +162,74 @@ export default function JobScreen() {
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/* ------------------------------ app output ----------------------------- */
+
+function AppOutputBlock({
+  job,
+}: {
+  job: { status: string; output_data?: string; error?: string };
+}) {
+  const theme = useTheme();
+  const isRunning = !isTerminalStatus(job.status);
+  const failed = job.status === 'failed';
+  const text = failed ? job.error ?? 'Run failed.' : job.output_data ?? '';
+
+  const copy = async () => {
+    if (text) await Clipboard.setStringAsync(text);
+  };
+
+  if (isRunning) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator color={theme.colors.primary} />
+        <Text style={{ color: theme.colors.textMuted, marginTop: spacing.sm }}>Running…</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View
+      style={[
+        styles.stepCard,
+        {
+          backgroundColor: theme.colors.surface,
+          borderColor: theme.colors.border,
+          padding: spacing.md,
+        },
+      ]}
+    >
+      <View
+        style={{
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: spacing.sm,
+        }}
+      >
+        <Text style={{ color: failed ? theme.colors.danger : theme.colors.text, fontWeight: '700' }}>
+          {failed ? 'Error' : 'Output'}
+        </Text>
+        {text ? (
+          <Pressable
+            onPress={copy}
+            style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+            hitSlop={6}
+          >
+            <Ionicons name="copy-outline" size={14} color={theme.colors.textMuted} />
+            <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs }}>Copy</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      <Text
+        selectable
+        style={{ color: theme.colors.text, fontSize: fontSize.sm, lineHeight: 22 }}
+      >
+        {text || '(no output)'}
+      </Text>
+    </View>
   );
 }
 
@@ -240,7 +320,9 @@ function StepCard({
                 styles.actionBtn,
                 {
                   backgroundColor:
-                    step.status === 'complete' ? theme.colors.primary : theme.colors.surfaceAlt,
+                    step.status === 'complete'
+                      ? theme.colors.primary
+                      : theme.colors.surfaceAlt,
                 },
               ]}
             >
@@ -248,7 +330,11 @@ function StepCard({
                 <ActivityIndicator color={theme.colors.primaryText} />
               ) : (
                 <>
-                  <Ionicons name="download-outline" size={16} color={theme.colors.primaryText} />
+                  <Ionicons
+                    name="download-outline"
+                    size={16}
+                    color={theme.colors.primaryText}
+                  />
                   <Text style={[styles.actionText, { color: theme.colors.primaryText }]}>
                     Open file
                   </Text>
@@ -261,7 +347,9 @@ function StepCard({
             <View style={styles.outputBlock}>
               <Pressable onPress={copyText} style={styles.copyBtn} hitSlop={6}>
                 <Ionicons name="copy-outline" size={14} color={theme.colors.textMuted} />
-                <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs }}>Copy</Text>
+                <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs }}>
+                  Copy
+                </Text>
               </Pressable>
               <Text
                 selectable

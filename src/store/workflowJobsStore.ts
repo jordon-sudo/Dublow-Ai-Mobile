@@ -1,8 +1,5 @@
 // src/store/workflowJobsStore.ts
-// Encrypted, persisted registry of workflow jobs the user has started.
-// Mirrors the conversationsStore pattern: AES-GCM via secureBlob on top
-// of AsyncStorage. Holds in-flight and recently completed jobs so they
-// survive app restarts and power the Jobs screen + background poller.
+// Encrypted, persisted registry of jobs (workflow + client-side app pseudo-jobs).
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { sealJson, openJson } from '../lib/secureBlob';
@@ -10,27 +7,30 @@ import { isTerminalStatus, type WorkflowJob, type JobStatus } from '../lib/appsT
 
 const BLOB_KEY = 'hatz_workflow_jobs_v1';
 
-// How long to keep terminal jobs before auto-purging (7 days).
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-// Cap on total tracked jobs to keep the blob small.
 const MAX_JOBS = 100;
+// If an app pseudo-job has been "running" longer than this, assume the app
+// was force-quit mid-run and mark it failed.
+const APP_STUCK_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface TrackedJob {
   job_id: string;
   app_id: string;
-  app_name: string;           // Snapshot of the app's display name at run time.
-  is_workflow: boolean;       // Always true today; reserved for future single-app async runs.
-  created_at: number;         // Local epoch ms when we kicked it off.
-  updated_at: number;         // Local epoch ms of the last snapshot write.
-  status: JobStatus | string; // Last observed server status.
-  notified: boolean;          // Has a local notification already fired for this terminal transition?
-  last_snapshot?: WorkflowJob;// Last full server response, for the Jobs screen.
-  inputs?: Record<string, unknown>; // What the user submitted, for replay/debug.
+  app_name: string;
+  is_workflow: boolean;        // false => client-side app pseudo-job
+  created_at: number;
+  updated_at: number;
+  status: JobStatus | string;
+  notified: boolean;
+  last_snapshot?: WorkflowJob; // workflows only
+  inputs?: Record<string, unknown>;
+  output_data?: string;        // apps: final text output
+  error?: string;              // apps: failure reason
 }
 
 interface Persisted {
   jobs: Record<string, TrackedJob>;
-  order: string[]; // job_ids, most recent first
+  order: string[];
 }
 
 interface State extends Persisted {
@@ -38,7 +38,6 @@ interface State extends Persisted {
 
   hydrate: () => Promise<void>;
 
-  /** Register a new job the instant /workflows/run returns a job_id. */
   trackJob: (params: {
     job_id: string;
     app_id: string;
@@ -46,30 +45,30 @@ interface State extends Persisted {
     inputs?: Record<string, unknown>;
   }) => Promise<void>;
 
-  /** Write a fresh server snapshot. Returns true if this write caused
-   *  the job to transition into a terminal status for the first time. */
+  trackAppJob: (params: {
+    job_id: string;
+    app_id: string;
+    app_name: string;
+    inputs?: Record<string, unknown>;
+  }) => Promise<void>;
+
+  completeAppJob: (job_id: string, output: string) => Promise<void>;
+  failAppJob: (job_id: string, error: string) => Promise<void>;
+
   updateJob: (job_id: string, snapshot: WorkflowJob) => Promise<boolean>;
-
-  /** Mark that a notification has been delivered for this job. */
   markNotified: (job_id: string) => Promise<void>;
-
-  /** Remove a job from tracking entirely. */
   removeJob: (job_id: string) => Promise<void>;
 
-  /** Convenience readers. */
   getJob: (job_id: string) => TrackedJob | null;
   getPendingJobs: () => TrackedJob[];
   getAllJobs: () => TrackedJob[];
 }
-
-/* ------------------------- helpers ------------------------- */
 
 async function persist(state: Persisted): Promise<void> {
   const packed = await sealJson({ jobs: state.jobs, order: state.order });
   await AsyncStorage.setItem(BLOB_KEY, packed);
 }
 
-/** Drop very old terminal jobs and cap the total list size. */
 function prune(state: Persisted): Persisted {
   const now = Date.now();
   const jobs: Record<string, TrackedJob> = {};
@@ -89,7 +88,28 @@ function prune(state: Persisted): Persisted {
   return { jobs, order: kept };
 }
 
-/* ------------------------- store --------------------------- */
+/** On hydrate, mark any app pseudo-job stuck in non-terminal state as failed.
+ *  Workflows are not swept — they live on the server and the poller handles them. */
+function sweepStuckAppJobs(state: Persisted): Persisted {
+  const now = Date.now();
+  const jobs = { ...state.jobs };
+  let mutated = false;
+  for (const id of state.order) {
+    const j = jobs[id];
+    if (!j) continue;
+    if (j.is_workflow) continue;
+    if (isTerminalStatus(j.status)) continue;
+    if (now - j.created_at < APP_STUCK_TIMEOUT_MS) continue;
+    jobs[id] = {
+      ...j,
+      status: 'failed',
+      error: 'Run interrupted (app closed before completion).',
+      updated_at: now,
+    };
+    mutated = true;
+  }
+  return mutated ? { jobs, order: state.order } : state;
+}
 
 export const useWorkflowJobs = create<State>((set, get) => ({
   jobs: {},
@@ -101,22 +121,20 @@ export const useWorkflowJobs = create<State>((set, get) => ({
     const packed = await AsyncStorage.getItem(BLOB_KEY);
     const loaded = await openJson<Persisted>(packed);
     if (loaded && loaded.jobs) {
-      const pruned = prune({
+      const base = prune({
         jobs: loaded.jobs,
         order: loaded.order?.length ? loaded.order : Object.keys(loaded.jobs),
       });
-      set({ ...pruned, hydrated: true });
-      // Persist pruned state back so disk reflects memory.
-      void persist(pruned);
+      const swept = sweepStuckAppJobs(base);
+      set({ ...swept, hydrated: true });
+      void persist(swept);
     } else {
       set({ hydrated: true });
     }
   },
 
   trackJob: async ({ job_id, app_id, app_name, inputs }) => {
-    const existing = get().jobs[job_id];
-    if (existing) return; // Idempotent.
-
+    if (get().jobs[job_id]) return;
     const now = Date.now();
     const job: TrackedJob = {
       job_id,
@@ -129,7 +147,6 @@ export const useWorkflowJobs = create<State>((set, get) => ({
       notified: false,
       inputs,
     };
-
     const jobs = { ...get().jobs, [job_id]: job };
     const order = [job_id, ...get().order.filter((x) => x !== job_id)];
     const pruned = prune({ jobs, order });
@@ -137,10 +154,58 @@ export const useWorkflowJobs = create<State>((set, get) => ({
     await persist(pruned);
   },
 
+  trackAppJob: async ({ job_id, app_id, app_name, inputs }) => {
+    if (get().jobs[job_id]) return;
+    const now = Date.now();
+    const job: TrackedJob = {
+      job_id,
+      app_id,
+      app_name,
+      is_workflow: false,
+      created_at: now,
+      updated_at: now,
+      status: 'running',
+      notified: false,
+      inputs,
+    };
+    const jobs = { ...get().jobs, [job_id]: job };
+    const order = [job_id, ...get().order.filter((x) => x !== job_id)];
+    const pruned = prune({ jobs, order });
+    set(pruned);
+    await persist(pruned);
+  },
+
+  completeAppJob: async (job_id, output) => {
+    const existing = get().jobs[job_id];
+    if (!existing) return;
+    const updated: TrackedJob = {
+      ...existing,
+      status: 'complete',
+      output_data: output,
+      updated_at: Date.now(),
+    };
+    const jobs = { ...get().jobs, [job_id]: updated };
+    set({ jobs });
+    await persist({ jobs, order: get().order });
+  },
+
+  failAppJob: async (job_id, error) => {
+    const existing = get().jobs[job_id];
+    if (!existing) return;
+    const updated: TrackedJob = {
+      ...existing,
+      status: 'failed',
+      error,
+      updated_at: Date.now(),
+    };
+    const jobs = { ...get().jobs, [job_id]: updated };
+    set({ jobs });
+    await persist({ jobs, order: get().order });
+  },
+
   updateJob: async (job_id, snapshot) => {
     const existing = get().jobs[job_id];
     if (!existing) return false;
-
     const wasTerminal = isTerminalStatus(existing.status);
     const nowTerminal = isTerminalStatus(snapshot.status);
     const justTerminated = !wasTerminal && nowTerminal;
@@ -151,12 +216,9 @@ export const useWorkflowJobs = create<State>((set, get) => ({
       last_snapshot: snapshot,
       updated_at: Date.now(),
     };
-
     const jobs = { ...get().jobs, [job_id]: updated };
-    // Keep order stable; no reordering on status change.
     set({ jobs });
     await persist({ jobs, order: get().order });
-
     return justTerminated;
   },
 
