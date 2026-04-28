@@ -17,6 +17,7 @@ import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { TOOL_CATALOG, groupedTools, ToolDef } from '../src/lib/tools';
 import { StatusBubble } from '../src/components/StatusBubble';
 import type { StreamStatus } from '../src/lib/hatzClient';
+import ConversationsDrawer from '../src/components/ConversationsDrawer';
 
 export default function ChatScreen() {
   const theme = useTheme();
@@ -38,6 +39,7 @@ export default function ChatScreen() {
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
   const [toolsPickerOpen, setToolsPickerOpen] = useState(false);
   const listRef = useRef<FlatList>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   // One-time seed from settings defaults when a fresh chat has no prefs set.
   useEffect(() => {
@@ -170,8 +172,8 @@ await client.streamChat(
     <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
       {/* Two-row header */}
       <View style={[styles.header, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-        <View style={{ flex: 1 }}>
-          <Pressable onPress={() => setTargetPickerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
+        <View style={{ flex: 1 }}><Pressable onPress={() => setDrawerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
+          
             <Text style={[styles.headerTitle, { color: theme.colors.text }]}>Chat</Text>
             <Ionicons name="chevron-down" size={16} color={theme.colors.textMuted} style={{ marginLeft: 4 }} />
           </Pressable>
@@ -439,6 +441,8 @@ await client.streamChat(
           </Pressable>
         </Pressable>
       </Modal>
+
+      <ConversationsDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </SafeAreaView>
   );
 }

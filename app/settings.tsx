@@ -42,15 +42,33 @@ export default function SettingsScreen() {
     '—';
 
   return (
-    <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.bg }]} edges={['bottom']}>
+    <SafeAreaView
+  style={[
+    styles.safe,
+    {
+      backgroundColor: theme.colors.bg,
+      marginTop: 0,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      overflow: 'hidden',
+    },
+  ]}
+  edges={['bottom']}
+>
       <Stack.Screen
-        options={{
-          title: 'Settings',
-          headerStyle: { backgroundColor: theme.colors.surface },
-          headerTitleStyle: { color: theme.colors.text },
-          headerTintColor: theme.colors.text,
-        }}
-      />
+  options={{
+    headerShown: true,
+    title: 'Settings',
+    headerStyle: { backgroundColor: theme.colors.surface },
+    headerTitleStyle: { color: theme.colors.text },
+    headerTintColor: theme.colors.text,
+    headerLeft: () => (
+      <Pressable onPress={() => router.back()} hitSlop={10} style={{ paddingHorizontal: 8 }}>
+        <Ionicons name="close" size={24} color={theme.colors.text} />
+      </Pressable>
+    ),
+  }}
+/>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
 
         <Section title="Account" theme={theme}>
@@ -86,6 +104,7 @@ export default function SettingsScreen() {
             placeholder="e.g. You are a concise, senior technical assistant…"
             placeholderTextColor={theme.colors.textMuted}
           />
+  
           <Pressable onPress={savePrompt} style={[styles.secondaryBtn, { borderColor: theme.colors.border, marginTop: spacing.sm }]}>
             <Ionicons name="save-outline" size={16} color={theme.colors.text} />
             <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Save Prompt</Text>

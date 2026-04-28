@@ -1,97 +1,109 @@
 // src/lib/jobPoller.ts
-// App-wide foreground poller. Scans workflowJobsStore for non-terminal jobs,
-// polls each via HatzClient, updates the store, and fires a local notification
-// on terminal transitions (exactly once per job).
+// Foreground-only poller. Every POLL_INTERVAL_MS it walks every non-terminal
+// job in workflowJobsStore, refreshes its status, and fires a local
+// notification the first time a job reaches a terminal state.
 import { AppState, type AppStateStatus } from 'react-native';
 import { HatzClient } from './hatzClient';
 import { isTerminalStatus } from './appsTypes';
-import { useWorkflowJobs } from '../store/workflowJobsStore';
+import { useWorkflowJobs, type TrackedJob } from '../store/workflowJobsStore';
 import { useSettings } from '../store/settingsStore';
 import { notifyJobComplete } from './notifications';
 
 const POLL_INTERVAL_MS = 5000;
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let inFlight = false;
 let appStateSub: { remove: () => void } | null = null;
-let polling = false; // reentrancy guard
+
+function getPendingJobs(): TrackedJob[] {
+  const { jobs } = useWorkflowJobs.getState();
+  return Object.values(jobs).filter(
+    (j) => !isTerminalStatus(j.status) || j.notified !== true,
+  );
+}
 
 async function tick(): Promise<void> {
-  if (polling) return;
-  polling = true;
+  if (inFlight) return;
+  const apiKey = useSettings.getState().apiKey;
+  if (!apiKey) return;
+
+  const pending = getPendingJobs();
+  if (pending.length === 0) return;
+
+  inFlight = true;
+  const client = new HatzClient(apiKey);
+  const { updateJob, markNotified } = useWorkflowJobs.getState();
+
   try {
-    const apiKey = useSettings.getState().apiKey;
-    if (!apiKey) return;
+    // Poll in parallel but cap concurrency to avoid bursts on large backlogs.
+    const batches = chunk(pending, 4);
+    for (const batch of batches) {
+      await Promise.all(
+        batch.map(async (job) => {
+          try {
+            const snapshot = await client.getJobStatus(job.job_id);
+            const wasTerminal = isTerminalStatus(job.status);
+            await updateJob(job.job_id, snapshot);
 
-    const state = useWorkflowJobs.getState();
-    if (!state.hydrated) return;
-
-    const pending = state.order
-      .map((id) => state.jobs[id])
-      .filter((j) => j && !isTerminalStatus(j.status) && !j.notified);
-
-    if (pending.length === 0) return;
-
-    const client = new HatzClient(apiKey);
-
-    // Poll sequentially to avoid bursting the API.
-    for (const job of pending) {
-      try {
-        const fresh = await client.getJobStatus(job.job_id);
-        const wasTerminal = isTerminalStatus(job.status);
-        await state.updateJob(job.job_id, fresh);
-
-        if (!wasTerminal && isTerminalStatus(fresh.status)) {
-          await notifyJobComplete({
-            job_id: job.job_id,
-            app_name: job.app_name,
-            status: fresh.status,
-          });
-          await useWorkflowJobs.getState().markNotified(job.job_id);
-        }
-      } catch (e) {
-        // Network blip — try again next tick.
-        console.warn('[jobPoller] tick error', job.job_id, e);
-      }
+            if (!wasTerminal && isTerminalStatus(snapshot.status) && !job.notified) {
+              // Read the freshly-updated job back out so the notification
+              // body reflects the latest status string.
+              const fresh = useWorkflowJobs.getState().jobs[job.job_id];
+              if (fresh) {
+                await notifyJobComplete(fresh);
+                await markNotified(job.job_id);
+              }
+            }
+          } catch (e) {
+            // Transient errors (network, 5xx) are ignored; next tick retries.
+            console.warn('[jobPoller] poll failed for', job.job_id, e);
+          }
+        }),
+      );
     }
   } finally {
-    polling = false;
+    inFlight = false;
   }
 }
 
-function startTimer() {
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function handleAppState(state: AppStateStatus) {
+  if (state === 'active') {
+    // Fire immediately on return to foreground so users see fresh state.
+    void tick();
+  }
+}
+
+/** Start the global job poller. Idempotent. */
+export function startJobPoller(): void {
   if (timer) return;
+
+  // Ensure the store is hydrated at least once before the first tick.
+  void useWorkflowJobs.getState().hydrate();
+
   timer = setInterval(() => {
     void tick();
   }, POLL_INTERVAL_MS);
-  // Kick immediately so users don't wait a full interval on app open.
+
+  appStateSub = AppState.addEventListener('change', handleAppState);
+
+  // Immediate first tick so a quick-completing job notifies fast.
   void tick();
 }
 
-function stopTimer() {
+/** Stop the poller. Only useful during teardown / tests. */
+export function stopJobPoller(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
-}
-
-function handleAppStateChange(next: AppStateStatus) {
-  if (next === 'active') startTimer();
-  else stopTimer();
-}
-
-/**
- * Start the global poller. Idempotent — safe to call multiple times.
- * Returns a disposer for cleanup.
- */
-export function startJobPoller(): () => void {
-  if (appStateSub) return () => {}; // already started
-
-  if (AppState.currentState === 'active') startTimer();
-  appStateSub = AppState.addEventListener('change', handleAppStateChange);
-
-  return () => {
-    stopTimer();
-    appStateSub?.remove();
+  if (appStateSub) {
+    appStateSub.remove();
     appStateSub = null;
-  };
+  }
 }

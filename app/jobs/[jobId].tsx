@@ -16,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
+import Markdown from 'react-native-markdown-display';
 import { useTheme, spacing, radii, fontSize } from '../../src/theme';
 import { useSettings } from '../../src/store/settingsStore';
 import { HatzClient } from '../../src/lib/hatzClient';
@@ -48,7 +49,6 @@ export default function JobScreen() {
   const [initialLoading, setInitialLoading] = useState(!trackedJob?.last_snapshot);
 
   const pollingRef = useRef(true);
-
   const isAppJob = trackedJob ? !trackedJob.is_workflow : false;
 
   useEffect(() => {
@@ -223,12 +223,15 @@ function AppOutputBlock({
           </Pressable>
         ) : null}
       </View>
-      <Text
-        selectable
-        style={{ color: theme.colors.text, fontSize: fontSize.sm, lineHeight: 22 }}
-      >
-        {text || '(no output)'}
-      </Text>
+      {failed ? (
+        <Text selectable style={{ color: theme.colors.danger, fontSize: fontSize.sm, lineHeight: 22 }}>
+          {text || '(no output)'}
+        </Text>
+      ) : text ? (
+        <Markdown style={mdStyles(theme) as any}>{text}</Markdown>
+      ) : (
+        <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.sm }}>(no output)</Text>
+      )}
     </View>
   );
 }
@@ -268,6 +271,10 @@ function StepCard({
       : step.output_data != null
         ? JSON.stringify(step.output_data, null, 2)
         : null;
+
+  // Structured JSON (stringified) is not markdown; keep as monospace.
+  const textIsMarkdown =
+    typeof step.output_data === 'string' && step.output_type !== 'json';
 
   const openFile = async () => {
     if (!client) return;
@@ -351,12 +358,20 @@ function StepCard({
                   Copy
                 </Text>
               </Pressable>
-              <Text
-                selectable
-                style={{ color: theme.colors.text, fontSize: fontSize.sm }}
-              >
-                {textOutput}
-              </Text>
+              {textIsMarkdown ? (
+                <Markdown style={mdStyles(theme) as any}>{textOutput}</Markdown>
+              ) : (
+                <Text
+                  selectable
+                  style={{
+                    color: theme.colors.text,
+                    fontSize: fontSize.sm,
+                    fontFamily: 'Courier',
+                  }}
+                >
+                  {textOutput}
+                </Text>
+              )}
             </View>
           ) : null}
 
@@ -369,6 +384,53 @@ function StepCard({
       ) : null}
     </View>
   );
+}
+
+/* ------------------------------ markdown styles ------------------------------ */
+
+function mdStyles(theme: ReturnType<typeof useTheme>) {
+  return {
+    body: { color: theme.colors.text, fontSize: fontSize.sm, lineHeight: 22 },
+    heading1: { color: theme.colors.text, fontSize: 22, fontWeight: '700', marginTop: 12, marginBottom: 6 },
+    heading2: { color: theme.colors.text, fontSize: 19, fontWeight: '700', marginTop: 10, marginBottom: 4 },
+    heading3: { color: theme.colors.text, fontSize: 17, fontWeight: '600', marginTop: 8, marginBottom: 4 },
+    strong: { color: theme.colors.text, fontWeight: '700' },
+    em: { fontStyle: 'italic' },
+    bullet_list: { marginVertical: 4 },
+    ordered_list: { marginVertical: 4 },
+    list_item: { marginVertical: 2, color: theme.colors.text },
+    paragraph: { color: theme.colors.text, marginVertical: 4 },
+    code_inline: {
+      backgroundColor: theme.colors.border,
+      color: theme.colors.text,
+      paddingHorizontal: 4,
+      borderRadius: 4,
+      fontFamily: 'Courier',
+    },
+    code_block: {
+      backgroundColor: theme.colors.border,
+      color: theme.colors.text,
+      padding: 10,
+      borderRadius: 6,
+      fontFamily: 'Courier',
+    },
+    fence: {
+      backgroundColor: theme.colors.border,
+      color: theme.colors.text,
+      padding: 10,
+      borderRadius: 6,
+      fontFamily: 'Courier',
+    },
+    link: { color: theme.colors.primary, textDecorationLine: 'underline' },
+    blockquote: {
+      backgroundColor: theme.colors.surfaceAlt,
+      borderLeftColor: theme.colors.primary,
+      borderLeftWidth: 3,
+      paddingLeft: spacing.sm,
+      paddingVertical: 4,
+    },
+    hr: { backgroundColor: theme.colors.border, height: 1, marginVertical: 10 },
+  };
 }
 
 /* -------------------------------- styles ------------------------------- */
