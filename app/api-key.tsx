@@ -62,13 +62,24 @@ export default function ApiKeyScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: theme.colors.bg }]} edges={['bottom']}>
       <Stack.Screen
-        options={{
-          title: 'API Key',
-          headerStyle: { backgroundColor: theme.colors.surface },
-          headerTitleStyle: { color: theme.colors.text },
-          headerTintColor: theme.colors.text,
-        }}
-      />
+  options={{
+    headerShown: true,
+    title: 'API Key',
+    headerStyle: { backgroundColor: theme.colors.surface },
+    headerTitleStyle: { color: theme.colors.text },
+    headerTintColor: theme.colors.text,
+    headerLeft: () => (
+      <Pressable
+        onPress={() => router.back()}
+        hitSlop={10}
+        style={{ paddingHorizontal: 8, flexDirection: 'row', alignItems: 'center' }}
+      >
+        <Ionicons name="chevron-back" size={22} color={theme.colors.text} />
+        <Text style={{ color: theme.colors.text, fontSize: fontSize.md, marginLeft: 2 }}>Back</Text>
+      </Pressable>
+    ),
+  }}
+/>
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
         <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.sm }}>
           Your Hatz AI key is stored in the device secure store. It is sent with every API request as the X-API-Key header.

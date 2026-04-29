@@ -268,49 +268,95 @@ async getWorkflowRaw(appId: string): Promise<AppItem> {
     return (await res.json()) as PresignedUrlResponse;
   }
   // ---------- File upload ----------
-  async uploadFile(file: { uri: string; name: string; type: string }): Promise<string> {
-    const form = new FormData();
-    form.append('file', {
-      uri: file.uri,
-      name: file.name,
-      type: file.type,
-    } as any);
+async uploadFile(
+  file: { uri: string; name: string; type: string },
+  scope?: {
+    scopeType: 'chat' | 'workflow' | 'app' | 'agent' | 'workflow_run' | 'user' | 'entity';
+    scopeId: string;
+  },
+): Promise<string> {
+  const form = new FormData();
+  form.append('file', {
+    uri: file.uri,
+    name: file.name,
+    type: file.type,
+  } as any);
 
-    const res = await fetch(`${BASE_URL}/files/upload`, {
-      method: 'POST',
-      headers: this.headers(),
-      body: form,
-    });
-
-    const headerDump: Record<string, string> = {};
-    res.headers.forEach((v, k) => { headerDump[k] = v; });
-    const text = await res.text();
-    console.log('[HatzClient.uploadFile] status', res.status);
-    console.log('[HatzClient.uploadFile] headers', headerDump);
-    console.log('[HatzClient.uploadFile] body', text);
-
-    if (!res.ok) throw new Error(`uploadFile ${res.status}: ${text.slice(0, 200)}`);
-
-    const locationHdr =
-      headerDump['location'] || headerDump['x-file-id'] || headerDump['x-file-uuid'];
-    if (locationHdr) {
-      const parts = locationHdr.split('/').filter(Boolean);
-      return parts[parts.length - 1];
-    }
-    if (text) {
-      try {
-        const json = JSON.parse(text);
-        const uuid =
-          json?.file_uuid ??
-          json?.uuid ??
-          json?.id ??
-          json?.data?.id ??
-          json?.data?.file_uuid;
-        if (uuid) return uuid;
-      } catch { /* not JSON */ }
-    }
-    throw new Error('uploadFile: could not locate file UUID in response. See console logs.');
+  // Per Hatz docs, /v1/files/upload accepts scope_type and scope_id as
+  // multipart form fields. Recommended for workflow file inputs.
+  if (scope) {
+    form.append('scope_type', scope.scopeType);
+    form.append('scope_id', scope.scopeId);
   }
+
+  const res = await fetch(`${BASE_URL}/files/upload`, {
+    method: 'POST',
+    headers: this.headers(),
+    body: form,
+  });
+
+  const headerDump: Record<string, string> = {};
+  res.headers.forEach((v, k) => { headerDump[k] = v; });
+  const text = await res.text();
+  console.log('[HatzClient.uploadFile] status', res.status);
+  console.log('[HatzClient.uploadFile] headers', headerDump);
+  console.log('[HatzClient.uploadFile] body', text);
+
+  if (!res.ok) throw new Error(`uploadFile ${res.status}: ${text.slice(0, 200)}`);
+
+  const locationHdr =
+    headerDump['location'] || headerDump['x-file-id'] || headerDump['x-file-uuid'];
+  if (locationHdr) {
+    const parts = locationHdr.split('/').filter(Boolean);
+    return parts[parts.length - 1];
+  }
+  if (text) {
+    try {
+      const json = JSON.parse(text);
+      const uuid =
+        json?.file_id ??
+        json?.file_uuid ??
+        json?.uuid ??
+        json?.id ??
+        json?.data?.id ??
+        json?.data?.file_uuid;
+      if (uuid) return uuid;
+    } catch { /* not JSON */ }
+  }
+  throw new Error('uploadFile: could not locate file UUID in response. See console logs.');
+}
+// ---------- Connection test ----------
+async testConnection(): Promise<void> {
+  const res = await fetch(`${BASE_URL}/chat/models`, {
+    method: 'GET',
+    headers: this.headers(),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`API key check failed (${res.status}): ${body.slice(0, 200)}`);
+  }
+}
+
+// ---------- User lookup by email ----------
+async getUserByEmail(email: string): Promise<{
+  id: string;
+  email: string;
+  first_name?: string | null;
+  last_name?: string | null;
+  tenant_id?: string | null;
+  role_name?: string | null;
+  invitation_status?: string | null;
+} | null> {
+  const url = `${BASE_URL}/admin/users?email=${encodeURIComponent(email)}`;
+  const res = await fetch(url, { method: 'GET', headers: this.headers() });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`User lookup failed (${res.status}): ${body.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  if (!json || !json.id) return null;
+  return json;
+}
 
   // ---------- Chat streaming ----------
   async streamChat(req: StreamChatRequest, handlers: StreamHandlers): Promise<void> {

@@ -9,8 +9,6 @@ import {
   TextInput,
   Pressable,
   StyleSheet,
-  Modal,
-  ScrollView,
   ActivityIndicator,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
@@ -32,16 +30,6 @@ export interface AppInputFormProps {
   hidden?: Set<string>;
 }
 
-/** Normalize options from either string[] or {label,value}[]. */
-function normalizeOptions(
-  raw: UserInput['options'],
-): Array<{ label: string; value: string }> {
-  if (!raw) return [];
-  return raw.map((o) =>
-    typeof o === 'string' ? { label: o, value: o } : { label: o.label, value: o.value },
-  );
-}
-
 export default function AppInputForm({
   inputs,
   values,
@@ -49,8 +37,6 @@ export default function AppInputForm({
   scopeAppId,
   hidden,
 }: AppInputFormProps) {
-  const theme = useTheme();
-
   const ordered = useMemo(
     () =>
       [...inputs]
@@ -120,9 +106,12 @@ function FieldRenderer({
   switch (input.variable_type) {
     case 'paragraph':
       return <ParagraphField value={value} onChange={onChange} placeholder={input.description} />;
+    // dropdown / multiple_choice render as plain single-line text inputs:
+    // the Hatz AppUserInputResponse schema does not expose an options array,
+    // so a modal picker would always be empty.
     case 'multiple_choice':
     case 'dropdown':
-      return <ChoiceField value={value} onChange={onChange} options={normalizeOptions(input.options)} />;
+      return <ShortField value={value} onChange={onChange} placeholder={input.description} />;
     case 'file_upload':
       return <FileField value={value} onChange={onChange} scopeAppId={scopeAppId} />;
     case 'url':
@@ -195,59 +184,6 @@ function ParagraphField({
         { color: theme.colors.text, backgroundColor: theme.colors.surface, borderColor: theme.colors.border },
       ]}
     />
-  );
-}
-
-function ChoiceField({
-  value,
-  onChange,
-  options,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: Array<{ label: string; value: string }>;
-}) {
-  const theme = useTheme();
-  const [open, setOpen] = useState(false);
-  const current = options.find((o) => o.value === value)?.label ?? 'Select…';
-
-  return (
-    <>
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={[styles.input, styles.choice, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
-      >
-        <Text style={{ color: value ? theme.colors.text : theme.colors.textMuted }}>{current}</Text>
-        <Ionicons name="chevron-down" size={18} color={theme.colors.textMuted} />
-      </Pressable>
-
-      <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.modalBg} onPress={() => setOpen(false)}>
-          <Pressable
-            style={[styles.modalSheet, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
-            onPress={() => {}}
-          >
-            <ScrollView style={{ maxHeight: 360 }}>
-              {options.map((o) => (
-                <Pressable
-                  key={o.value}
-                  onPress={() => {
-                    onChange(o.value);
-                    setOpen(false);
-                  }}
-                  style={[styles.choiceRow, { borderBottomColor: theme.colors.border }]}
-                >
-                  <Text style={{ color: theme.colors.text }}>{o.label}</Text>
-                  {o.value === value ? (
-                    <Ionicons name="checkmark" size={18} color={theme.colors.text} />
-                  ) : null}
-                </Pressable>
-              ))}
-            </ScrollView>
-          </Pressable>
-        </Pressable>
-      </Modal>
-    </>
   );
 }
 
@@ -329,24 +265,5 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  modalBg: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'center',
-    padding: spacing.lg,
-  },
-  modalSheet: {
-    borderRadius: radii.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: spacing.sm,
-  },
-  choiceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.sm,
-    borderBottomWidth: StyleSheet.hairlineWidth,
   },
 });

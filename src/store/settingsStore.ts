@@ -5,6 +5,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { HatzClient, ModelInfo, AppInfo } from '../lib/hatzClient';
 
 const API_KEY_SLOT = 'hatz_api_key';
+const USER_EMAIL_SLOT = 'hatz_user_email';
+const USER_HASH_ID_SLOT = 'hatz_user_hash_id';
 const PREFS_KEY = 'hatz_prefs_v2';
 
 interface Prefs {
@@ -21,12 +23,10 @@ const DEFAULT_PREFS: Prefs = {
   defaultAutoTools: true,
 };
 
-/** A single selectable target in the picker (model or agent). */
 export interface PickTarget extends ModelInfo {}
 
-/** Grouped view for the picker UI. */
 export interface TargetGroup {
-  title: string;       // "My Agents" | developer name
+  title: string;
   kind: 'agent' | 'model';
   items: PickTarget[];
 }
@@ -34,25 +34,26 @@ export interface TargetGroup {
 interface SettingsState {
   hydrated: boolean;
   apiKey: string | null;
-  models: PickTarget[];     // All models + agents, flat
+  userEmail: string | null;
+  userHashId: string | null;
+  models: PickTarget[];
   apps: AppInfo[];
 
-  // Prefs
   selectedModel: string | null;
   systemPrompt: string;
   defaultTools: string[];
   defaultAutoTools: boolean;
 
-  // Actions
   hydrate: () => Promise<void>;
   setApiKey: (key: string | null) => Promise<void>;
+  setAuth: (args: { apiKey: string; userEmail: string; userHashId: string }) => Promise<void>;
+  signOut: () => Promise<void>;
   setSelectedModel: (id: string) => Promise<void>;
   setSystemPrompt: (s: string) => Promise<void>;
   setDefaultTools: (t: string[]) => Promise<void>;
   setDefaultAutoTools: (b: boolean) => Promise<void>;
   refreshCatalog: () => Promise<void>;
 
-  // Derived
   getClient: () => HatzClient | null;
   getGroupedTargets: () => TargetGroup[];
 }
@@ -64,18 +65,22 @@ async function savePrefs(p: Prefs) {
 export const useSettings = create<SettingsState>((set, get) => ({
   hydrated: false,
   apiKey: null,
+  userEmail: null,
+  userHashId: null,
   models: [],
   apps: [],
   ...DEFAULT_PREFS,
 
   hydrate: async () => {
     try {
-      const [key, prefsRaw] = await Promise.all([
+      const [key, email, hashId, prefsRaw] = await Promise.all([
         SecureStore.getItemAsync(API_KEY_SLOT),
+        SecureStore.getItemAsync(USER_EMAIL_SLOT),
+        SecureStore.getItemAsync(USER_HASH_ID_SLOT),
         AsyncStorage.getItem(PREFS_KEY),
       ]);
       const prefs: Prefs = prefsRaw ? { ...DEFAULT_PREFS, ...JSON.parse(prefsRaw) } : DEFAULT_PREFS;
-      set({ apiKey: key, ...prefs, hydrated: true });
+      set({ apiKey: key, userEmail: email, userHashId: hashId, ...prefs, hydrated: true });
       if (key) await get().refreshCatalog();
     } catch (e) {
       console.warn('settings hydrate failed', e);
@@ -89,6 +94,32 @@ export const useSettings = create<SettingsState>((set, get) => ({
     set({ apiKey: key });
     if (key) await get().refreshCatalog();
     else set({ models: [], apps: [] });
+  },
+
+  setAuth: async ({ apiKey, userEmail, userHashId }) => {
+    await Promise.all([
+      SecureStore.setItemAsync(API_KEY_SLOT, apiKey),
+      SecureStore.setItemAsync(USER_EMAIL_SLOT, userEmail),
+      SecureStore.setItemAsync(USER_HASH_ID_SLOT, userHashId),
+    ]);
+    set({ apiKey, userEmail, userHashId });
+    await get().refreshCatalog();
+  },
+
+  signOut: async () => {
+    await Promise.all([
+      SecureStore.deleteItemAsync(API_KEY_SLOT),
+      SecureStore.deleteItemAsync(USER_EMAIL_SLOT),
+      SecureStore.deleteItemAsync(USER_HASH_ID_SLOT),
+    ]);
+    set({
+      apiKey: null,
+      userEmail: null,
+      userHashId: null,
+      models: [],
+      apps: [],
+      selectedModel: null,
+    });
   },
 
   setSelectedModel: async (id) => {
@@ -140,10 +171,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
         client.listAgents().catch((e) => { console.warn('listAgents', e); return [] as ModelInfo[]; }),
         client.listApps().catch((e) => { console.warn('listApps', e); return [] as AppInfo[]; }),
       ]);
-      // Merge agents + models into a single flat list; UI groups via getGroupedTargets.
       set({ models: [...agents, ...models], apps });
 
-      // If no model selected yet, default to first available model (not agent).
       if (!get().selectedModel) {
         const firstModel = models[0] ?? agents[0];
         if (firstModel) await get().setSelectedModel(firstModel.id);
@@ -163,7 +192,6 @@ export const useSettings = create<SettingsState>((set, get) => ({
     const agents = all.filter((t) => t.kind === 'agent');
     const models = all.filter((t) => t.kind === 'model');
 
-    // Agents: single group, alpha by label.
     const agentGroup: TargetGroup | null = agents.length
       ? {
           title: 'My Agents',
@@ -172,7 +200,6 @@ export const useSettings = create<SettingsState>((set, get) => ({
         }
       : null;
 
-    // Models: group by provider (developer), alpha groups, alpha within group.
     const byProvider = new Map<string, PickTarget[]>();
     for (const m of models) {
       const key = m.provider || 'Other';

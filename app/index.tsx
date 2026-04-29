@@ -3,13 +3,14 @@ import { useState, useRef, useEffect } from 'react';
 import {
   View, Text, TextInput, FlatList, Pressable,
   KeyboardAvoidingView, Platform, StyleSheet, ActivityIndicator, Alert,
-  Modal, ScrollView,
+  Modal, ScrollView, ActionSheetIOS,
 } from 'react-native';
 import { Link } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import Markdown from 'react-native-markdown-display';
 import { useSettings } from '../src/store/settingsStore';
 import { useChat } from '../src/store/chatStore';
@@ -18,6 +19,54 @@ import { TOOL_CATALOG, groupedTools, ToolDef } from '../src/lib/tools';
 import { StatusBubble } from '../src/components/StatusBubble';
 import type { StreamStatus } from '../src/lib/hatzClient';
 import ConversationsDrawer from '../src/components/ConversationsDrawer';
+
+// Accepted file types for Hatz uploads.
+const ACCEPTED_EXTENSIONS = [
+  'pdf', 'doc', 'docx', 'txt', 'md', 'rtf',
+  'csv', 'xls', 'xlsx',
+  'ppt', 'pptx',
+  'json', 'xml', 'html', 'htm',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'heic',
+];
+
+const ACCEPTED_MIME_PREFIXES = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument',
+  'application/vnd.ms-excel',
+  'application/vnd.ms-powerpoint',
+  'text/',
+  'image/',
+  'application/json',
+  'application/xml',
+];
+
+function isAcceptedFile(name: string, mime: string): boolean {
+  const lowerName = (name || '').toLowerCase();
+  const ext = lowerName.includes('.') ? lowerName.split('.').pop()! : '';
+  const lowerMime = (mime || '').toLowerCase();
+
+  if (ACCEPTED_EXTENSIONS.includes(ext)) return true;
+  if (ACCEPTED_MIME_PREFIXES.some((p) => lowerMime.startsWith(p))) return true;
+  return false;
+}
+
+function prettyExt(name: string): string {
+  const lower = (name || '').toLowerCase();
+  const ext = lower.includes('.') ? lower.split('.').pop()! : '';
+  return ext ? `.${ext}` : 'this file type';
+}
+
+// RFC4122 v4 UUID — used as scope_id for chat file uploads.
+function uuidv4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+type AttachedAsset = { uri: string; name: string; type: string };
 
 export default function ChatScreen() {
   const theme = useTheme();
@@ -41,15 +90,16 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // One-time seed from settings defaults when a fresh chat has no prefs set.
+  // Per-chat scope for file uploads; rotates on "New Chat".
+  const [chatScopeId, setChatScopeId] = useState<string>(() => uuidv4());
+
+  // Map of file UUID -> human-readable name, for the attachment chips.
+  const [fileNames, setFileNames] = useState<Record<string, string>>({});
+
   useEffect(() => {
     if (messages.length === 0) {
-      if (activeTools.length === 0 && defaultTools.length > 0) {
-        setActiveTools(defaultTools);
-      }
-      if (autoTools !== defaultAutoTools) {
-        setAutoTools(defaultAutoTools);
-      }
+      if (activeTools.length === 0 && defaultTools.length > 0) setActiveTools(defaultTools);
+      if (autoTools !== defaultAutoTools) setAutoTools(defaultAutoTools);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -69,7 +119,6 @@ export default function ChatScreen() {
     appendAssistantDelta('');
     setBusy(true);
 
-    // Prepend system prompt if set.
     const sys = useSettings.getState().systemPrompt?.trim();
     const base = useChat.getState().messages
       .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
@@ -77,65 +126,156 @@ export default function ChatScreen() {
     const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
 
     setStreamStatus({ kind: 'thinking' });
-await client.streamChat(
-  {
-    ...(models.find(m => m.id === selectedModel)?.kind === 'agent'
-  ? { agent_id: selectedModel }
-  : { model: selectedModel }),
-    messages: history,
-    auto_tool_selection: autoTools,
-    tools_to_use: autoTools ? undefined : activeTools,
-    file_uuids: attachedFileIds,
-  },
-  {
-    onToken: (delta) => appendAssistantDelta(delta),
-    onStatus: (s) => setStreamStatus(s),
-    onDone: () => {
-      finalizeAssistant();
-      setStreamStatus(null);
-      setBusy(false);
-    },
-    onError: (err) => {
-      appendAssistantDelta(`\n\n_Error: ${err.message}_`);
-      finalizeAssistant();
-      setStreamStatus(null);
-      setBusy(false);
-    },
-  },
-);
+    await client.streamChat(
+      {
+        ...(models.find((m) => m.id === selectedModel)?.kind === 'agent'
+          ? { agent_id: selectedModel }
+          : { model: selectedModel }),
+        messages: history,
+        auto_tool_selection: autoTools,
+        tools_to_use: autoTools ? undefined : activeTools,
+        file_uuids: attachedFileIds,
+      },
+      {
+        onToken: (delta) => appendAssistantDelta(delta),
+        onStatus: (s) => setStreamStatus(s),
+        onDone: () => { finalizeAssistant(); setStreamStatus(null); setBusy(false); },
+        onError: (err) => {
+          appendAssistantDelta(`\n\n_Error: ${err.message}_`);
+          finalizeAssistant(); setStreamStatus(null); setBusy(false);
+        },
+      },
+    );
   };
 
   const confirmClear = () => {
     if (messages.length === 0) return;
     Alert.alert('Start a new chat?', 'This will delete the current conversation.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'New Chat', style: 'destructive', onPress: () => clear() },
+      {
+        text: 'New Chat',
+        style: 'destructive',
+        onPress: () => {
+          clear();
+          setFileNames({});
+        },
+      },
     ]);
   };
 
-  const pickAndUpload = async () => {
-    console.log('[pickAndUpload] invoked');
-    const client = getClient();
-    if (!client) return;
-    try {
-      const res = await DocumentPicker.getDocumentAsync({
-        multiple: false,
-        copyToCacheDirectory: true,
-      });
-      if (res.canceled || !res.assets?.[0]) return;
-      const asset = res.assets[0];
-      setUploading(true);
-      const uuid = await client.uploadFile({
-        uri: asset.uri,
-        name: asset.name ?? 'file',
-        type: asset.mimeType ?? 'application/octet-stream',
-      });
-      await addAttachedFileId(uuid);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-    } catch (e: any) {
-      Alert.alert('Upload failed', e?.message ?? 'Unknown error');
-    } finally {
-      setUploading(false);
+  // ---------- Attachments ----------
+
+  const uploadAsset = async (asset: AttachedAsset) => {
+  const client = getClient();
+  const apps = useSettings.getState().apps;
+  if (!client) return;
+
+  // Client-side type guard.
+  if (!isAcceptedFile(asset.name, asset.type)) {
+    Alert.alert(
+      'Unsupported file type',
+      `Hatz does not accept ${prettyExt(asset.name)} files.\n\nSupported formats include PDF, Word, Excel, PowerPoint, text, CSV, JSON, and common image types (PNG, JPG, GIF, WEBP, HEIC).\n\nIf you need this file, export or convert it to a supported format and try again.`,
+    );
+    return;
+  }
+
+  const scopeApp = apps.find((a: any) => a.id);
+  if (!scopeApp?.id) {
+    Alert.alert(
+      'Cannot upload',
+      'No app found in your Hatz workspace. File uploads require at least one app in your account. Please create an app at ai.hatz.ai and try again.',
+    );
+    return;
+  }
+
+  try {
+    setUploading(true);
+    console.log('[upload] starting', asset.name, asset.type, 'scope=app', scopeApp.id);
+    const uuid = await client.uploadFile(
+      { uri: asset.uri, name: asset.name, type: asset.type },
+      { scopeType: 'app', scopeId: scopeApp.id },
+    );
+    await addAttachedFileId(uuid);
+    setFileNames((prev) => ({ ...prev, [uuid]: asset.name }));
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+  } catch (e: any) {
+    console.warn('[upload] failed', e?.message || e);
+    Alert.alert('Upload failed', e?.message ?? 'Unknown error');
+  } finally {
+    setUploading(false);
+  }
+};
+
+  const pickDocument = async () => {
+    const res = await DocumentPicker.getDocumentAsync({ multiple: false, copyToCacheDirectory: true });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    await uploadAsset({
+      uri: a.uri,
+      name: a.name ?? 'file',
+      type: a.mimeType ?? 'application/octet-stream',
+    });
+  };
+
+  const pickPhoto = async () => {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Photo library access is required.');
+      return;
+    }
+    const res = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.9,
+    });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    await uploadAsset({
+      uri: a.uri,
+      name: a.fileName ?? `photo-${Date.now()}.jpg`,
+      type: a.mimeType ?? 'image/jpeg',
+    });
+  };
+
+  const takePhoto = async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      Alert.alert('Permission needed', 'Camera access is required.');
+      return;
+    }
+    const res = await ImagePicker.launchCameraAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      quality: 0.9,
+    });
+    if (res.canceled || !res.assets?.[0]) return;
+    const a = res.assets[0];
+    await uploadAsset({
+      uri: a.uri,
+      name: a.fileName ?? `photo-${Date.now()}.jpg`,
+      type: a.mimeType ?? 'image/jpeg',
+    });
+  };
+
+  const openAttachmentSheet = () => {
+    console.log('[attach] opening sheet');
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Cancel', 'Take Photo', 'Choose Photo', 'Choose File'],
+          cancelButtonIndex: 0,
+        },
+        (idx) => {
+          if (idx === 1) takePhoto();
+          else if (idx === 2) pickPhoto();
+          else if (idx === 3) pickDocument();
+        },
+      );
+    } else {
+      Alert.alert('Attach', 'Select a source', [
+        { text: 'Take Photo', onPress: takePhoto },
+        { text: 'Choose Photo', onPress: pickPhoto },
+        { text: 'Choose File', onPress: pickDocument },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
     }
   };
 
@@ -168,12 +308,11 @@ await client.streamChat(
     );
   }
 
-  return (
+ return (
     <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
-      {/* Two-row header */}
       <View style={[styles.header, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
-        <View style={{ flex: 1 }}><Pressable onPress={() => setDrawerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
-          
+        <View style={{ flex: 1 }}>
+          <Pressable onPress={() => setDrawerOpen(true)} style={styles.headerTitleRow} hitSlop={6}>
             <Text style={[styles.headerTitle, { color: theme.colors.text }]}>Chat</Text>
             <Ionicons name="chevron-down" size={16} color={theme.colors.textMuted} style={{ marginLeft: 4 }} />
           </Pressable>
@@ -184,7 +323,7 @@ await client.streamChat(
         <Link href={'/apps' as any} asChild>
           <Pressable style={styles.iconBtn} hitSlop={8}>
             <Ionicons name="apps-outline" size={22} color={theme.colors.text} />
-            </Pressable>
+          </Pressable>
         </Link>
         <Pressable onPress={confirmClear} style={styles.iconBtn} hitSlop={8}>
           <Ionicons name="create-outline" size={22} color={theme.colors.text} />
@@ -233,115 +372,113 @@ await client.streamChat(
           }}
         />
         {busy && streamStatus && streamStatus.kind !== 'writing' ? (
-  <StatusBubble status={streamStatus} />
-) : null}
+          <StatusBubble status={streamStatus} />
+        ) : null}
 
-        {/* Attached files strip */}
+        {/* Attachment chips — shows real file names above the composer */}
         {attachedFileIds.length > 0 && (
           <View style={[styles.filesStrip, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>
-              {attachedFileIds.map((id) => (
-                <View key={id} style={[styles.fileChip, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
-                  <Ionicons name="document-outline" size={14} color={theme.colors.textMuted} />
-                  <Text numberOfLines={1} style={{ color: theme.colors.text, fontSize: fontSize.xs, maxWidth: 120 }}>
-                    {id.slice(0, 8)}…
-                  </Text>
-                  <Pressable onPress={() => removeAttachedFileId(id)} hitSlop={8}>
-                    <Ionicons name="close" size={14} color={theme.colors.textMuted} />
-                  </Pressable>
-                </View>
-              ))}
+              {attachedFileIds.map((id) => {
+                const label = fileNames[id] ?? `${id.slice(0, 8)}…`;
+                return (
+                  <View key={id} style={[styles.fileChip, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
+                    <Ionicons name="document-outline" size={14} color={theme.colors.textMuted} />
+                    <Text numberOfLines={1} style={{ color: theme.colors.text, fontSize: fontSize.xs, maxWidth: 160 }}>
+                      {label}
+                    </Text>
+                    <Pressable onPress={() => { removeAttachedFileId(id); setFileNames((p) => { const n = { ...p }; delete n[id]; return n; }); }} hitSlop={8}>
+                      <Ionicons name="close" size={14} color={theme.colors.textMuted} />
+                    </Pressable>
+                  </View>
+                );
+              })}
             </ScrollView>
           </View>
         )}
 
         <View style={[
-  styles.composer,
-  {
-    backgroundColor: theme.colors.surface,
-    borderColor: theme.colors.border,
-    paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.sm,
-  },
-]}>
-  {/* Row 1: input + send */}
-  <View style={styles.inputRow}>
-    <TextInput
-      style={[styles.input, { color: theme.colors.text, flex: 1 }]}
-      placeholder="Message"
-      placeholderTextColor={theme.colors.textMuted}
-      value={input}
-      onChangeText={setInput}
-      multiline
-    />
-    <Pressable
-      onPress={send}
-      disabled={!canSend}
-      style={[styles.sendBtn, { backgroundColor: theme.colors.primary, opacity: canSend ? 1 : 0.5 }]}
-    >
-      {busy ? (
-        <ActivityIndicator color={theme.colors.primaryText} />
-      ) : (
-        <Ionicons name="arrow-up" size={20} color={theme.colors.primaryText} />
-      )}
-    </Pressable>
-  </View>
+          styles.composer,
+          {
+            backgroundColor: theme.colors.surface,
+            borderColor: theme.colors.border,
+            paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.sm,
+          },
+        ]}>
+          <View style={styles.inputRow}>
+            <TextInput
+              style={[styles.input, { color: theme.colors.text, flex: 1 }]}
+              placeholder="Message"
+              placeholderTextColor={theme.colors.textMuted}
+              value={input}
+              onChangeText={setInput}
+              multiline
+            />
+            <Pressable
+              onPress={send}
+              disabled={!canSend}
+              style={[styles.sendBtn, { backgroundColor: theme.colors.primary, opacity: canSend ? 1 : 0.5 }]}
+            >
+              {busy ? (
+                <ActivityIndicator color={theme.colors.primaryText} />
+              ) : (
+                <Ionicons name="arrow-up" size={20} color={theme.colors.primaryText} />
+              )}
+            </Pressable>
+          </View>
 
-  {/* Row 2: chips */}
-  <View style={styles.dock}>
-    <Pressable onPress={pickAndUpload} style={styles.dockIcon} hitSlop={8} disabled={uploading}>
-      {uploading ? (
-        <ActivityIndicator size="small" color={theme.colors.text} />
-      ) : (
-        <Ionicons name="add" size={22} color={theme.colors.text} />
-      )}
-    </Pressable>
+          <View style={styles.dock}>
+            <Pressable onPress={openAttachmentSheet} style={styles.dockIcon} hitSlop={8} disabled={uploading}>
+              {uploading ? (
+                <ActivityIndicator size="small" color={theme.colors.text} />
+              ) : (
+                <Ionicons name="add" size={22} color={theme.colors.text} />
+              )}
+            </Pressable>
 
-    {/* Auto tools toggle */}
-    <Pressable
-      onPress={() => setAutoTools(!autoTools)}
-      style={[styles.dockChip, {
-        backgroundColor: autoTools ? theme.colors.primarySoft : 'transparent',
-        borderColor: theme.colors.border,
-      }]}
-      hitSlop={6}
-    >
-      <Ionicons name="flash" size={14} color={autoTools ? theme.colors.primary : theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: autoTools ? theme.colors.text : theme.colors.textMuted }]}>Auto</Text>
-    </Pressable>
+            <Pressable
+              onPress={() => setAutoTools(!autoTools)}
+              style={[styles.dockChip, {
+                backgroundColor: autoTools ? theme.colors.primarySoft : 'transparent',
+                borderColor: theme.colors.border,
+              }]}
+              hitSlop={6}
+            >
+              <Ionicons name="flash" size={14} color={autoTools ? theme.colors.primary : theme.colors.textMuted} />
+              <Text style={[styles.dockChipText, { color: autoTools ? theme.colors.text : theme.colors.textMuted }]}>Auto</Text>
+            </Pressable>
 
-    {/* Tools dropdown (disabled when auto is on) */}
-    <Pressable
-      onPress={() => !autoTools && setToolsPickerOpen(true)}
-      disabled={autoTools}
-      style={[styles.dockChip, {
-        borderColor: theme.colors.border,
-        opacity: autoTools ? 0.4 : 1,
-        backgroundColor: !autoTools && activeTools.length > 0 ? theme.colors.primarySoft : 'transparent',
-      }]}
-      hitSlop={6}
-    >
-      <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: theme.colors.textMuted }]}>
-        {activeTools.length > 0 && !autoTools ? `Tools · ${activeTools.length}` : 'Tools'}
-      </Text>
-      <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
-    </Pressable>
+            <Pressable
+              onPress={() => !autoTools && setToolsPickerOpen(true)}
+              disabled={autoTools}
+              style={[styles.dockChip, {
+                borderColor: theme.colors.border,
+                opacity: autoTools ? 0.4 : 1,
+                backgroundColor: !autoTools && activeTools.length > 0 ? theme.colors.primarySoft : 'transparent',
+              }]}
+              hitSlop={6}
+            >
+              <Ionicons name="construct-outline" size={14} color={theme.colors.textMuted} />
+              <Text style={[styles.dockChipText, { color: theme.colors.textMuted }]}>
+                {activeTools.length > 0 && !autoTools ? `Tools · ${activeTools.length}` : 'Tools'}
+              </Text>
+              <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
+            </Pressable>
 
-    {/* Model / target dropdown */}
-    <Pressable
-      onPress={() => setTargetPickerOpen(true)}
-      style={[styles.dockChip, { borderColor: theme.colors.border }]}
-      hitSlop={6}
-    >
-      <Ionicons name="cube-outline" size={14} color={theme.colors.textMuted} />
-      <Text style={[styles.dockChipText, { color: theme.colors.text }]}>Models</Text>
-      <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
-    </Pressable>
-  </View>
-</View>
+            <Pressable
+              onPress={() => setTargetPickerOpen(true)}
+              style={[styles.dockChip, { borderColor: theme.colors.border }]}
+              hitSlop={6}
+            >
+              <Ionicons name="cube-outline" size={14} color={theme.colors.textMuted} />
+              <Text style={[styles.dockChipText, { color: theme.colors.text }]}>Models</Text>
+              <Ionicons name="chevron-down" size={12} color={theme.colors.textMuted} />
+            </Pressable>
+          </View>
+        </View>
       </KeyboardAvoidingView>
 
-      {/* ---------- Target picker modal ---------- */}
+      {/* Target picker */}
       <Modal visible={targetPickerOpen} transparent animationType="slide" onRequestClose={() => setTargetPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setTargetPickerOpen(false)}>
           <Pressable
@@ -392,7 +529,7 @@ await client.streamChat(
         </Pressable>
       </Modal>
 
-      {/* ---------- Tools picker modal ---------- */}
+{/* Tools picker */}
       <Modal visible={toolsPickerOpen} transparent animationType="slide" onRequestClose={() => setToolsPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setToolsPickerOpen(false)}>
           <Pressable
@@ -504,17 +641,17 @@ const styles = StyleSheet.create({
     fontSize: fontSize.md,
   },
   inputRow: {
-  flexDirection: 'row',
-  alignItems: 'flex-end',
-  gap: spacing.sm,
-  marginBottom: spacing.sm,
-},
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
   dock: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  gap: spacing.sm,
-  flexWrap: 'wrap',
-},
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    flexWrap: 'wrap',
+  },
   dockIcon: {
     width: 34, height: 34, borderRadius: radii.pill,
     alignItems: 'center', justifyContent: 'center',
@@ -550,6 +687,5 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.md, paddingVertical: spacing.md,
     borderRadius: radii.md, borderWidth: StyleSheet.hairlineWidth,
-    marginBottom: spacing.sm,
   },
 });

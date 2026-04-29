@@ -1,0 +1,281 @@
+Dublow AI - Mobile App Changelog
+================================
+
+v0.0.1 - Environment Verification
+- Confirmed Node, npm, and Git installed and functioning on Windows development machine.
+- Expo Go installed on target test device.
+
+v0.0.2 - Project Scaffold
+- New Expo project initialized: hatz-chat using expo-template-blank-typescript.
+- Core dependencies installed: expo-router, expo-secure-store, expo-linking, expo-constants, expo-status-bar, @react-native-async-storage/async-storage, react-native-safe-area-context, react-native-screens, react-native-gesture-handler.
+- Additional libraries: zustand, react-native-markdown-display, nanoid.
+- First device smoke test via Expo Go QR confirmed starter template loads.
+
+v0.0.3 - Project Configuration
+- package.json main entry pointed at expo-router/entry.
+- app.json replaced with Hatz-branded configuration: slug hatz-chat, scheme hatzchat, bundle identifier com.dublowdigital.hatzchat, typed routes enabled, expo-router and expo-secure-store plugins registered.
+- Default App.tsx deleted in favor of file-based routing under app/.
+
+v0.0.4 - Initial Screen and Store Scaffold
+- Created app/_layout.tsx - navigation shell with hydration trigger on boot.
+- Created app/index.tsx - chat screen with message list, composer, empty state.
+- Created app/settings.tsx - API key input and model list selector.
+- Created src/lib/hatzClient.ts - single API boundary with listModels and streamChat.
+- Created src/store/settingsStore.ts (Zustand) - API key in SecureStore, selected model in AsyncStorage.
+- Created src/store/chatStore.ts (Zustand) - persisted conversation history in AsyncStorage.
+
+v0.0.5 - File Placement Correction (First Occurrence)
+- Nested app/app/ directory created inadvertently during file creation.
+- Files relocated to correct outer app/ directory.
+- Convention adopted: click project root in Explorer before creating new files to avoid subfolder inheritance.
+
+v0.0.6 - Device Connectivity Resolution
+- LAN mode failed due to network client-isolation constraints.
+- Switched to tunnel mode: npx expo start -c --tunnel, with @expo/ngrok installed on first use.
+- App successfully loaded on device.
+
+v0.0.7 - Dependency Resolution Workaround
+- React 19 peer-dependency conflict with react-native-markdown-display.
+- .npmrc added at project root with legacy-peer-deps=true.
+- Subsequent installs unblocked.
+
+v0.0.8 - Hatz API Integration (Live)
+- Hatz API contract confirmed from provided OpenAPI JSON:
+    - Base URL: https://ai.hatz.ai/v1
+    - Auth: X-API-Key header.
+    - Models: GET /chat/models, returning { data: [{ name, developer, display_name, max_tokens, vision }] }.
+    - Chat: POST /chat/completions with { model, messages, stream }.
+- hatzClient.ts rewritten against real contract using expo/fetch for streaming.
+- Auto-detect logic added for delta-vs-cumulative streaming frame formats.
+- First end-to-end chat completion successful on device.
+
+v0.0.9 - Visual Design Direction Set
+- Target aesthetic defined to match dublow.hatz.ai.
+- Palette extracted: primary #7818D8, background #212121, surface #292929, border #636363.
+- Default theme: dark only.
+- Typography: system stack.
+- Chat style: rounded bubbles for user messages; assistant messages rendered directly on background (no bubble).
+- Header: two-row design - "Chat" dropdown (placeholder for conversation switcher) above model name, settings and new-chat icons on right.
+- Input area: message field with buttons below - add-files, Auto tools toggle, Tools dropdown, Model dropdown, Send.
+- Empty state: nothing.
+- Splash: black background with white "Hatz" wordmark.
+- Model picker fix: white text required on dark background.
+
+v0.1.0 - Theme System Implemented
+- src/theme.ts created with full Hatz palette, spacing scale, radii, and font sizes.
+- useTheme hook exposed; dark-only for now, hook structure preserves API for future light mode.
+
+v0.1.1 - Root Layout Rework
+- app/_layout.tsx updated:
+    - Hydrates both settings and chat stores on mount.
+    - Displays black "Hatz" wordmark boot screen until hydration completes.
+    - Applies dark themed navigation chrome.
+    - Suppresses known harmless react-native-markdown-display key-spread warning via LogBox.ignoreLogs.
+
+v0.1.2 - Chat Screen Visual Overhaul
+- Two-row header implemented with Chat (down-arrow) / model label.
+- User bubbles in Hatz purple; assistant responses rendered on background with 26px line-height for readability.
+- Composer redesigned with icon dock beneath input: upload (+), Auto pill, Tools pill, Model pill, Send.
+- Model picker now a bottom-sheet modal with handle, grouped scroll list, and selection checkmark.
+- Tight-response complaint addressed via increased lineHeight.
+
+v0.1.3 - Repeated Truncation Incidents
+- Multiple assistant code deliveries truncated mid-file.
+- Recovery workflow adopted: split-delivery with explicit "Part 1 / Part 2" markers, paste adjacency enforced, followed by file-level verification.
+
+v0.1.4 - Agents, Apps, and Tools Feature Set
+- Expanded Hatz client (src/lib/hatzClient.ts) with:
+    - listAgents() and listApps() endpoints.
+    - File upload (POST /files/upload) with UUID extraction.
+    - Extended streamChat accepting auto_tool_selection, tools_to_use, and file_uuids.
+    - runApp(appId, inputs, model?, fileUuids?) against POST /app/{id}/query, tolerating multiple response shapes.
+- Settings store extended:
+    - Bumped persistence key to hatz_prefs_v2 to avoid stale-schema collisions.
+    - Added systemPrompt, defaultTools, defaultAutoTools persisted preferences.
+    - refreshCatalog fetches models, agents, and apps in parallel with independent failure tolerance.
+    - getGroupedTargets derives UI grouping: "My Agents" first, then models grouped alphabetically by developer.
+- Chat store extended with per-session attachedFileIds, activeTools, autoTools.
+- New file src/lib/tools.ts introduced as canonical tool catalog across Web & Search, Code, Location & Weather, and Documents categories.
+
+v0.1.5 - Chat Screen Feature Integration
+- Header extended with Apps icon linking to new /apps page.
+- Attached-files strip rendered above composer when files present.
+- File upload wired through expo-document-picker with spinner state.
+- Auto toggle gates the Tools picker; Tools picker shows selected count.
+- Model/agent picker displays per-item kind icon and provider metadata.
+- One-time seeding of per-chat defaults from Settings prefs on empty conversation.
+
+v0.1.6 - Apps Pages
+- app/apps.tsx created listing available apps.
+- app/app/[id].tsx created with dynamic form rendered from each app's inputs, executing against runApp, with results displayed on a dedicated screen (not injected into chat thread).
+
+v0.1.7 - Settings Page Redesign
+- Old model selector removed from Settings.
+- Sections added: Account (API Key Management sub-page), System Prompt, Tool Defaults (Default Auto Tools switch + Default Tools picker), About (app version, build number, documentation links to docs.hatz.ai and dublow.hatz.ai).
+- app/api-key.tsx created as dedicated key management sub-page with test-connection capability.
+
+v0.1.8 - Routing Type Cache Resolution
+- Typed-route errors encountered after adding /apps and /app/[id].
+- Structural fix: ensured app/app/[id].tsx exists as folder+dynamic-file pattern.
+- Workaround for stale typed-route cache: as-any cast applied at Link/push call sites.
+- Cache regenerated via npx expo start -c and TS Server restart.
+
+v0.1.9 - Composer Positioning Fixes
+- Send button color behavior changed to always-purple with opacity dimming when disabled, rather than conditional background swap.
+- Send button positioning corrected via marginLeft: 'auto'; dock row given flexWrap: 'wrap' for narrow screens.
+- Composer raised above bottom safe-area curve using useSafeAreaInsets and dynamic bottom padding.
+- Input and dock split into distinct inputRow and dock rows for clearer layout hierarchy.
+- dockIcon style accidentally deleted and restored.
+
+v0.2.0 - Stream Status Channel (Thinking / Tool / Writing UX)
+- StreamStatus union type added to client: thinking, tool, summary, writing.
+- StreamHandlers extended with optional onStatus callback.
+- streamChat parser updated to route non-content events to the status channel rather than leak them into message body.
+- New component src/components/StatusBubble.tsx created - animated three-dot pill with contextual label and icon, using Animated API (no new dependencies).
+- Chat screen integrated: streamStatus state, initial "thinking" set at send time, bubble hidden once first content token arrives, cleared on done/error.
+- Casing mismatch in client import corrected (hatzClient lowercase enforced across project).
+
+v0.2.1 - Stream Format Correction
+- Diagnostic logs revealed server emits NDJSON (single newline separators), not SSE (data: prefix + double newline).
+- Discovered "Thinking" content is not a separate event type - it is embedded as <details><summary>Thinking</summary>...</details> HTML inside the content stream itself.
+- Parser redesign scoped to: (a) switch to NDJSON framing, (b) strip <details> blocks from assistant-visible text and route them to status bubble.
+
+v0.2.2 - Syntax Recovery
+- Missing closing brace at end of hatzClient.ts class restored after edit.
+
+v0.2.3 - Agent Selection Bug (422 RequestValidationError)
+- Selecting "Absolute Opus 4.6" (and similar agents) produced 422: Model '<name>' not found. Query GET /v1/chat/models for available models.
+- Root cause: UI call site passes the agent's display label as req.model rather than its canonical ID.
+- Fix in progress at UI call site (send function in app/index.tsx); resolution confirmed by user as completed.
+
+v0.2.4 - Multi-thread conversations
+Added
+- Multi-thread conversations: create, switch between, rename, pin, and delete chats from a new left-sliding drawer accessed via the header title.
+- Full-text search across conversation titles and message bodies.
+- Automatic chat titling (3-6 words) generated after the first assistant reply, with manual rename override.
+- Encrypted local persistence for all conversation data using AES-256-GCM; encryption key stored in the device keystore via expo-secure-store.
+- Store access patterns. useConversations((s) => s.newConversation) inside the component body (reactive selector) vs. useConversations.getState().getActive() inside the handler (one-shot read) - both are legitimate. Use the selector when you want the component to re-render when the value changes; use .getState() inside event handlers where you want the latest value at invocation time without subscribing.
+- Delete-by-long-press in the drawer replaces the old "clear the one thread" escape hatch. The model is cleaner: chats are first-class objects; you manage them from the drawer.
+Changed
+- Header title now opens the conversations drawer instead of the model picker. Model and agent selection remains available via the Models chip in the composer dock.
+- chatStore refactored into a compatibility shim over the new conversationsStore; public API unchanged, so existing screens continue to work without modification.
+- Idempotent "new chat" button. The guard in handleNewChat ensures that tapping the button when you are already on an untouched fresh thread is a no-op (plus a subtle haptic to acknowledge the tap). This matches behavior you'd expect from ChatGPT, Claude, and similar apps.
+- Removed the duplicate <Text> rendering the model label outside the Pressable.
+- Moved the muted-color styling onto the remaining subtitle inside the Pressable, so the entire title + model label block stays tappable as one target.
+- Flipped headerTitleRow to vertical stacking, which is almost certainly the layout intended when the second copy was originally added.
+Migrated
+- Existing single-thread chat history is automatically migrated into a conversation titled "Previous chat" on first launch; the legacy hatz_chat_v2 AsyncStorage key is removed after migration.
+Dependencies
+- Added @noble/ciphers, @noble/hashes, and expo-crypto for pure-JS AES-GCM encryption (no native module; Expo Go compatible).
+
+v0.2.5 - Workflows, Jobs list, etc.
+Added
+- src/lib/appsTypes.ts - single source of truth for app/workflow shapes. Exports AppItem, WorkflowApp, the isWorkflow type guard (narrows to WorkflowApp), and isTerminalStatus to centralize the pending | running | complete | failed state machine. All downstream modules import from here; no more scattered string literals.
+- listAppsRaw / getAppRaw on the API client - return server-shaped AppItem (with user_inputs, prompt_sections/steps, variable_type) for the new tabbed Apps screen and dynamic form renderer. Coexist with the legacy listApps / getApp (which still flatten to AppInfo via normalizeApp) so existing callers are untouched. Legacy pair to be removed once all screens migrate.
+- listApps name filter - accepts a name query forwarded to the server. The Apps screen's search input is debounced (300 ms) and filters server-side; no client-side fuzzy matching.
+- workflowJobsStore (encrypted, persisted) - single source of truth for workflow runs, consumed by the Jobs screen, foreground poller, and future background-poll/notification layer.
+    - WorkflowJob holds the raw server snapshot; TrackedJob wraps it with local metadata (start time, notified flag, submitted inputs) so server shape changes cannot corrupt local bookkeeping.
+    - updateJob(id, snapshot) returns true only on the non-terminal -> terminal transition - the precise hook for firing a notification. Idiom: if (await updateJob(id, snap)) { fireNotification(id); await markNotified(id); }. Two-step commit prevents duplicate notifications under poller races.
+    - notified is persisted to disk (not in-memory) so a killed-and-relaunched app does not re-notify completed jobs.
+    - Pruning on hydrate: terminal jobs older than 7 days dropped; total list capped at 100.
+    - Ordering is creation-time (most recent first) and stable across status changes - rows do not jump while polling.
+
+v0.2.6 - Workflows, Jobs list, etc.
+Added
+- AppInputForm - schema-driven, controlled field renderer.
+    - Adding a new variable_type requires one case in FieldRenderer; nothing else changes.
+    - Parent owns values; component is pure render + change reporting (trivial to gate the Run button, persist drafts, or prefill).
+    - File inputs are scope-aware: scopeAppId is forwarded to client.uploadFile(file, { scopeType: 'workflow', scopeId }) per Hatz workflow-file guidance.
+    - normalizeOptions accepts both string[] and {label, value}[] and produces a uniform internal shape.
+    - Choice fields use a modal picker consistent with the existing model-picker sheet - no native-picker dependency.
+- Apps & Workflows tabbed screen (app/apps.tsx) - TabView-based, providing swipe and animated tab strip for free.
+    - Single listAppsRaw fetch split into two tabs via isWorkflow + useMemo; pull-to-refresh refreshes both.
+    - Keystroke updates query immediately; debounced value (300 ms) triggers load().
+    - Distinct error, empty-with-search, and empty states.
+- App runner screen - loads via getAppRaw, hands user_inputs directly to AppInputForm.
+    - Guard: workflow UUIDs opened on the app route are detected by isWorkflow and redirected to the workflow runner, avoiding an empty form and a failing /query call.
+    - Run button disables until every required field has a non-empty trimmed value.
+
+v0.2.7 - Workflows, Jobs list, etc.
+Added
+- Workflow runner screen - same AppInputForm; submits to /workflows/run, receives job_id, calls trackJob before router.replace('/jobs/{job_id}') so a cold-start deep link finds the job already in local state. Uses router.replace (not push) so Back from the Jobs screen returns to the Apps list. Shows a steps-count chip (app.steps?.length) as a "this will take a moment" affordance. running is not reset on success - only on error - to avoid a flicker before navigation.
+- Workflow job detail screen (app/jobs/[jobId].tsx) - live poller with terminal-state output rendering.
+    - pollingRef is a mutable ref (not state) so the setInterval callback always reads the latest flag - avoids stale-closure bugs.
+    - Flips to no-op on terminal status; no unnecessary network calls.
+    - Every snapshot is written through updateJob so the store - not in-memory state - arbitrates the terminal transition.
+    - Presigned file URLs are minted on demand against /v1/workflows/presigned-url and handed to Linking.openURL, ensuring a fresh 1-hour TTL each tap.
+    - Permissive output rendering: string -> text; object -> pretty-printed JSON; file output_type -> "Open file" button.
+- Jobs list screen (app/jobs/index.tsx) - lists every tracked job from workflowJobsStore, ordered most-recent-first, with status color coding and tap-through to detail.
+- Jobs entry point in Apps header - clock icon (top-right of app/apps.tsx) routes to /jobs. The Jobs screen is now reachable via (a) automatic router.replace after a workflow run, (b) the new header icon, and (c) direct deep link to /jobs or /jobs/{id}.
+Changed
+- client.uploadFile - second argument is now an optional scope object. Existing chat-composer call site client.uploadFile({ uri, name, type }) compiles and behaves identically. When called as client.uploadFile(file, { scopeType: 'workflow', scopeId: appId }), two extra multipart fields are appended and the server treats the upload as workflow-scoped. Backward compatible.
+Unchanged (intentional)
+- streamChat - <thinking> sentinel parsing, SSE reader loop, tolerant event-type matching, partial-chunk handling, [DONE] sentinel, and non-JSON line tolerance are all preserved. Do not refactor; the corner cases are handled and working.
+
+v0.2.8 - Local notifications for workflow jobs
+Added
+- src/lib/notifications.ts - local-notification layer built on expo-notifications.
+    - ensureNotificationPermission() - idempotent permission request; honors iOS canAskAgain and guards a re-prompt on Android via a module-level flag. Creates the Android workflow-jobs channel on first grant (required for API 26+).
+    - notifyJobComplete(job) - fires an immediate local notification on terminal status, with distinct title/body for complete vs failed, and data: { job_id } payload for deep-linking.
+    - installNotificationTapHandler() - registers a response listener that routes taps to /jobs/{job_id} via expo-router. 50 ms deferral ensures the router is mounted when the app is cold-started from a tap.
+    - Foreground setNotificationHandler set at module top level so banners appear even when the app is open.
+Changed
+- app/_layout.tsx - root effect now calls ensureNotificationPermission() once at startup and installs the tap handler, returning the unsubscribe on teardown.
+
+v0.2.9 - Global foreground job poller
+Added
+- src/lib/jobPoller.ts - idempotent foreground poller that drives every notification.
+    - 5 s interval over non-terminal jobs in workflowJobsStore; concurrency capped at 4 to avoid bursts.
+    - inFlight reentrancy guard prevents overlapping ticks on slow networks.
+    - AppState listener fires an immediate tick on return to foreground, catching jobs that completed while the device was locked.
+    - Terminal-transition detection is store-sourced (wasTerminal read before updateJob), so it cooperates correctly with the detail screen's 3 s poller without duplicate notifications. markNotified is the second layer of defense.
+    - Transient errors are logged at warn and swallowed; the next tick retries.
+- workflowJobsStore.markNotified(job_id) action and TrackedJob.notified?: boolean field.
+Changed
+- app/_layout.tsx - startJobPoller() added inside the startup effect.
+Known limitation
+- Fully suspended or force-quit apps do not tick. Background execution is deferred to a future expo-background-task pass, which requires a dev build.
+
+v0.3.0 - Import-path and routing stability fixes
+Fixed
+- src/lib/hatzClient.ts - corrected appsTypes import from '../src/lib/appsTypes' (which resolved to src/src/lib/appsTypes) to the sibling path './appsTypes'. This unblocked the entire module graph; the "Unmatched Route - Page not found" screen was a downstream symptom of the compile failure here.
+- app/index.tsx - corrected './appsTypes' import to '../src/lib/appsTypes'.
+- Metro cache guidance documented: after adding files under app/, restart with npx expo start -c to avoid phantom route-not-found errors.
+
+v0.3.1 - Markdown rendering in job detail
+Added
+- react-native-markdown-display integrated into app/jobs/[jobId].tsx.
+    - AppOutputBlock renders successful app output as Markdown; failures remain plain red text.
+    - StepCard renders string step outputs as Markdown, except when output_type === 'json', which is kept in monospace for legibility.
+    - Shared mdStyles(theme) helper defines body, headings, lists, inline/fenced code, blockquotes, links, and horizontal rules consistent with the app theme.
+Unchanged
+- app/workflows/[appId].tsx left untouched; it dispatches the job and navigates away, with no output to render.
+
+v0.3.2 - Settings sheet redesign
+Changed
+- app/settings.tsx now presents as a ~90%-height bottom sheet rather than a full-bleed screen.
+    - Transparent backdrop (rgba(0,0,0,0.4)) with a 60 px tap-to-dismiss spacer above the sheet.
+    - Rounded top corners (borderTopLeftRadius: 20), in-body header with title and close affordance, and bottom-edge safe-area handling.
+    - Sections preserved: Account (API Key Management link), System Prompt, Tool Defaults (auto-tools switch + default tools picker modal), About (version, build, documentation links).
+
+v0.3.3 - Working updated 
+
+v0.3.4 - Extend HatzClient.uploadFile with optional scope argument
+Changed
+- src/lib/hatzClient.ts: uploadFile now accepts an optional { scopeType, scopeId } argument and forwards them as scope_type / scope_id multipart fields to POST /v1/files/upload, matching the Hatz File Upload spec. Also checks json.file_id before json.file_uuid when extracting the returned UUID, aligning with the current API response shape.
+Fixed
+- Resolves TS2554 raised by AppInputForm.FileField.pick, which was passing a second scope argument the previous single-parameter signature rejected.
+
+v0.3.4 - Multi-source chat attachments with named chips and chat-scoped uploads
+Added
+- app/index.tsx: openAttachmentSheet now presents Take Photo / Choose Photo / Choose File via ActionSheetIOS on iOS and Alert.alert on Android, delegating to pickDocument, pickPhoto, and takePhoto helpers backed by expo-document-picker and expo-image-picker.
+- app/index.tsx: Per-chat chatScopeId (RFC4122 v4) is generated on mount and rotated whenever the user starts a new chat, and is forwarded as scope_type=chat / scope_id to client.uploadFile so /v1/files/upload no longer 422s on missing scope fields.
+- app/index.tsx: fileNames map stores the human-readable filename for each uploaded file UUID; the attachments strip above the composer now shows the real filename chip-style instead of the truncated UUID, and clearing an attachment also removes its name entry.
+Changed
+- app/index.tsx: Replaced the direct DocumentPicker pickAndUpload path wired to the "+" button with openAttachmentSheet; uploadAsset is the single code path that calls client.uploadFile, updates attachedFileIds, and surfaces failures via Alert plus a console.warn.
+Dependencies
+- package.json: Added expo-image-picker via `npx expo install expo-image-picker`.
+- app.json: Registered the expo-image-picker config plugin with photosPermission and cameraPermission strings so iOS/Android permission prompts render with product-specific copy.
+Notes
+- Hatz OpenAPI JSON does not declare scope_type / scope_id on /v1/files/upload, but the live server requires them (confirmed via 422 RequestValidationError). The DOCX documentation is authoritative; the OpenAPI spec is stale.
+- If the model still ignores uploaded files after this change, the next follow-up is to poll GET /v1/files/{file_id}/status until status === "ready" before submitting file_uuids in a completion request.

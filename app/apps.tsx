@@ -93,7 +93,7 @@ export default function AppsScreen() {
     const id = (item as any).id;
     if (!id) return;
     if (isWorkflow(item)) router.push(`/workflows/${id}` as any);
-    else router.push(`/apps/${id}` as any);
+    else router.push(`/app/${id}` as any);
   };
 
   const renderScene = ({ route }: { route: Route }) => {

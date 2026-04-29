@@ -2,7 +2,7 @@
   "expo": {
     "name": "Hatz Chat",
     "slug": "hatz-chat",
-    "version": "0.2.3",
+    "version": "0.3.4",
     "scheme": "hatzchat",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -21,7 +21,17 @@
       "package": "com.dublowdigital.hatzchat",
       "backgroundColor": "#000000"
     },
-    "plugins": ["expo-router", "expo-secure-store"],
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Hatz Chat to attach photos to your messages.",
+          "cameraPermission": "Allow Hatz Chat to take photos for your messages."
+        }
+      ]
+    ],
     "experiments": { "typedRoutes": true }
   }
 }

@@ -1,5 +1,5 @@
 // app/_layout.tsx
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect } from 'react';
 import { View, Text, LogBox } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -22,17 +22,19 @@ export default function RootLayout() {
   const hydrateSettings = useSettings((s) => s.hydrate);
   const hydrateChat = useChat((s) => s.hydrate);
   const hydrated = useSettings((s) => s.hydrated);
+  const userHashId = useSettings((s) => s.userHashId);
+  const apiKey = useSettings((s) => s.apiKey);
   const theme = useTheme();
+
+  const router = useRouter();
+  const segments = useSegments();
 
   useEffect(() => {
     hydrateSettings();
     hydrateChat();
 
-    // Notifications: request permission once; install tap -> deep-link handler.
     void ensureNotificationPermission();
     const unsubNotifTap = installNotificationTapHandler();
-
-    // Global foreground poller for workflow job completion.
     startJobPoller();
 
     return () => {
@@ -40,7 +42,19 @@ export default function RootLayout() {
     };
   }, [hydrateSettings, hydrateChat]);
 
-  // Black boot screen with white "Hatz" wordmark until hydration completes.
+  // Gate: route to /signin when auth is incomplete, and away from /signin when complete.
+  useEffect(() => {
+    if (!hydrated) return;
+    const onSignIn = segments[0] === 'signin';
+    const authed = !!apiKey && !!userHashId;
+
+    if (!authed && !onSignIn) {
+      router.replace('/signin');
+    } else if (authed && onSignIn) {
+      router.replace('/');
+    }
+  }, [hydrated, apiKey, userHashId, segments, router]);
+
   if (!hydrated) {
     return (
       <View
