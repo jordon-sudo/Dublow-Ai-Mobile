@@ -758,3 +758,25 @@ Notes
 - Sentry auth token for source map uploads belongs in a local .env (SENTRY_AUTH_TOKEN). .env is gitignored.
 - Event instrumentation at call sites (chat_message_sent, chat_message_received, model_changed, prompt_used, file_uploaded, app_run, workflow_run, error_shown) is not yet wired. Only app_open and sign_in fire today. The wrapper and privacy surface are in place so the remaining wiring is additive.
 
+v0.40.0 - Event instrumentation across chat, prompts, apps, and job registry
+
+Added
+- src/lib/telemetry.ts: latencyBucket(ms) helper exported from the telemetry module. Returns one of lt_500ms, lt_1_5s, lt_3s, lt_8s, lt_20s, gte_20s. Coarse buckets are intentional — exact timings can fingerprint users and correlate events, so we never ship raw milliseconds.
+- app/index.tsx: chat_message_sent fires on send with { model_id, kind, has_attachments, attachment_count, tools_count, auto_tools }. chat_message_received fires on stream completion with { model_id, ok, latency_bucket } plus error_kind on failure. On stream error, captureError() also reports to Sentry with { where: 'streamChat', model_id }.
+- app/index.tsx: classifyError(err) local helper maps thrown errors to coarse categories (network, timeout, unauthorized, forbidden, rate_limited, server_error, unknown). Raw error.message is never shipped — it can contain URLs, request IDs, or partial user content.
+- app/index.tsx: model_changed fires from three sources with a source prop: 'picker' (target picker confirm), 'regenerate' (regen flow), 'image_shortcut' (empty-state image button). message_regenerated fires on regenerate confirm with { model_id }.
+- app/index.tsx: file_uploaded fires on upload success with { ok: true, mime_family } where mime_family is only the part before '/' in the MIME type. On failure, { ok: false, error_kind } plus captureError(e, { where: 'uploadFile' }). File names and extensions are never sent.
+- app/prompts.tsx: prompt_used fires on prompt launch with { has_placeholders, folder_kind } where folder_kind is 'dublow' | 'personal' | 'custom'. prompt_folder_created fires on successful folder creation. prompt_folder_deleted fires on folder deletion confirm. Prompt titles, bodies, and tags are never sent.
+- app/prompt-fill.tsx: prompt_filled_submitted fires from both submit paths with { mode: 'complete' | 'as_is', placeholder_count, filled_count }. Values themselves are never sent.
+- app/apps.tsx: apps_tab_changed fires on TabView index change with { tab: 'apps' | 'workflows' }. apps_list_load_failed fires in the list load catch block alongside captureError(e, { where: 'apps.load' }). app_opened fires on item press with { kind: 'app' | 'workflow' } before router.push. Item names and IDs are never sent.
+- app/apps/[appId].tsx: app_detail_load_failed fires in the getAppRaw catch block alongside captureError(e, { where: 'app.load' }). app_run_started fires before the job handoff with { input_count, filled_count } — filled_count counts trimmed non-empty string values and non-null non-string values. app_run_start_failed fires if the handoff itself throws, paired with captureError(e, { where: 'app.run' }).
+- src/lib/appRunRegistry.ts: startedAt captured at run registration. app_run_completed fires on both success and failure branches with { ok, latency } and adds { error_kind: err.name } on failure. captureError(e, { where: 'appRun.execute' }) on failure. Completion events live in the registry rather than the runner screen because the runner unmounts before the async run resolves.
+
+Changed
+- src/lib/notifications.ts: notifyJobComplete parameter type widened from TrackedJob to Pick<TrackedJob, 'job_id' | 'app_name' | 'status'>. The function only reads those three fields, and callers in appRunRegistry.ts construct a synthetic job-shaped object rather than a full TrackedJob. TrackedJob import is retained for Pick<>.
+
+Notes
+- All event properties pass through sanitize() in src/lib/telemetry.ts: primitives only, strings truncated to 64 chars, nullish values stripped. Any accidental content leakage fails closed.
+- app/workflows/[appId].tsx is not yet instrumented. workflow_run_started, workflow_step_started, workflow_step_completed, and workflow_run_completed remain to be wired — scheduled for v0.40.1.
+- error_shown (paired with user-facing Alert.alert surfaces) deferred; lower priority than the run/flow events shipped here.
+

@@ -28,6 +28,24 @@ import ModelPickerSheet from '../src/components/ModelPickerSheet';
 import ChatEmptyState from '../src/components/ChatEmptyState';
 import { copyText, shareText, buildQuoteMarkdown, deriveTitleFromMessage } from '../src/lib/messageActions';
 import UsageBanner from '../src/components/UsageBanner';
+import { track, captureError, latencyBucket } from '../src/lib/telemetry';
+
+
+/**
+ * Maps an error to a coarse category for analytics.
+ * We never ship error.message itself — it can contain URLs, request IDs,
+ * or partial user content. Buckets are stable enough to aggregate trends.
+ */
+function classifyError(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
+  if (msg.includes('network') || msg.includes('fetch')) return 'network';
+  if (msg.includes('timeout')) return 'timeout';
+  if (msg.includes('401') || msg.includes('unauthorized')) return 'unauthorized';
+  if (msg.includes('403') || msg.includes('forbidden')) return 'forbidden';
+  if (msg.includes('429') || msg.includes('rate') || msg.includes('quota')) return 'rate_limited';
+  if (msg.includes('5')) return 'server_error';
+  return 'unknown';
+}
 
 const ACCEPTED_EXTENSIONS = [
   'pdf', 'doc', 'docx', 'txt', 'md', 'rtf',
@@ -164,6 +182,16 @@ export default function ChatScreen() {
     const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
     const isAgent = models.find((m) => m.id === modelId)?.kind === 'agent';
 
+    const startedAt = Date.now();
+    track('chat_message_sent', {
+      model_id: modelId,
+      kind: isAgent ? 'agent' : 'model',
+      has_attachments: attachedFileIds.length > 0,
+      attachment_count: attachedFileIds.length,
+      tools_count: autoTools ? 0 : activeTools.length,
+      auto_tools: autoTools,
+    });
+
     await client.streamChat(
       {
         ...(isAgent ? { agent_id: modelId } : { model: modelId }),
@@ -175,10 +203,24 @@ export default function ChatScreen() {
       {
         onToken: (delta) => appendAssistantDelta(delta),
         onStatus: (s) => setStreamStatus(s),
-        onDone: () => { finalizeAssistant(); setStreamStatus(null); setBusy(false); },
+        onDone: () => {
+          finalizeAssistant(); setStreamStatus(null); setBusy(false);
+          track('chat_message_received', {
+            model_id: modelId,
+            ok: true,
+            latency_bucket: latencyBucket(Date.now() - startedAt),
+          });
+        },
         onError: (err) => {
           appendAssistantDelta(`\n\n_Error: ${err.message}_`);
           finalizeAssistant(); setStreamStatus(null); setBusy(false);
+          track('chat_message_received', {
+            model_id: modelId,
+            ok: false,
+            latency_bucket: latencyBucket(Date.now() - startedAt),
+            error_kind: classifyError(err),
+          });
+          captureError(err, { where: 'streamChat', model_id: modelId });
         },
       },
     );
@@ -328,6 +370,7 @@ export default function ChatScreen() {
     // Persist the choice on the active conversation so switching away and
     // back restores image mode.
     useConversations.getState().patchActive({ modelId: imageModel.id });
+    track('model_changed', { model_id: imageModel.id, source: 'image_shortcut' });
   };
 
   // -------------------- Message-level action handlers --------------------
@@ -449,6 +492,8 @@ export default function ChatScreen() {
     // so the composer reflects it from here on.
     await setSelectedModel(modelId);
     useConversations.getState().patchActive({ modelId });
+    track('model_changed', { model_id: modelId, source: 'regenerate' });
+    track('message_regenerated', { model_id: modelId });
 
     // Strip the last assistant message, then re-stream a fresh one.
     removeLastAssistantMessage();
@@ -489,8 +534,14 @@ export default function ChatScreen() {
       await addAttachedFileId(uuid);
       setFileNames((prev) => ({ ...prev, [uuid]: asset.name }));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      // NB: we deliberately do not include file name or extension. mime_family
+      // (the part before '/') is coarse enough to be useful without leakage.
+      const mimeFamily = (asset.type || '').split('/')[0] || 'unknown';
+      track('file_uploaded', { ok: true, mime_family: mimeFamily });
     } catch (e: any) {
       Alert.alert('Upload failed', e?.message ?? 'Unknown error');
+      track('file_uploaded', { ok: false, error_kind: classifyError(e) });
+      captureError(e, { where: 'uploadFile' });
     } finally {
       setUploading(false);
     }
@@ -848,6 +899,7 @@ export default function ChatScreen() {
                           // Remember this choice on the active conversation so
                           // switching away and back restores the same model.
                           useConversations.getState().patchActive({ modelId: m.id });
+                          track('model_changed', { model_id: m.id, kind: m.kind, source: 'picker' });
                           setTargetPickerOpen(false);
                         }}
                         style={[styles.modelRow, {

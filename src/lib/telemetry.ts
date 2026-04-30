@@ -83,6 +83,20 @@ export function captureError(err: unknown, context?: Extras) {
 /** Wrap the root component so uncaught errors land in Sentry with a boundary. */
 export const wrapRoot = Sentry.wrap;
 
+/**
+ * Coarse latency bucket. We never ship exact millisecond timings - they can
+ * fingerprint users and correlate across events. Buckets are stable enough
+ * to spot regressions without that risk.
+ */
+export function latencyBucket(ms: number): string {
+  if (ms < 500) return 'lt_500ms';
+  if (ms < 1500) return 'lt_1_5s';
+  if (ms < 3000) return 'lt_3s';
+  if (ms < 8000) return 'lt_8s';
+  if (ms < 20000) return 'lt_20s';
+  return 'gte_20s';
+}
+
 // --- internal ---
 
 /**

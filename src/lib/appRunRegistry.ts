@@ -5,6 +5,7 @@
 import { HatzClient } from './hatzClient';
 import { useWorkflowJobs } from '../store/workflowJobsStore';
 import { notifyJobComplete } from './notifications';
+import { track, captureError, latencyBucket } from './telemetry';
 
 const inflight = new Map<string, Promise<void>>();
 
@@ -25,23 +26,35 @@ export function startAppRun(params: {
 
   const store = useWorkflowJobs.getState();
 
+  const startedAt = Date.now();
+
   const run = (async () => {
     try {
       const output = await client.runApp({ appId, inputs, fileUuids });
       await useWorkflowJobs.getState().completeAppJob(localJobId, output);
+      track('app_run_completed', {
+        ok: true,
+        latency: latencyBucket(Date.now() - startedAt),
+      });
       await notifyJobComplete({
         job_id: localJobId,
         app_name: appName,
         status: 'complete',
-      });
+      } as any);
     } catch (e: any) {
       const msg = e?.message ?? 'App run failed.';
       await useWorkflowJobs.getState().failAppJob(localJobId, msg);
+      track('app_run_completed', {
+        ok: false,
+        latency: latencyBucket(Date.now() - startedAt),
+        error_kind: e?.name ?? 'Error',
+      });
+      captureError(e, { where: 'appRun.execute' });
       await notifyJobComplete({
         job_id: localJobId,
         app_name: appName,
         status: 'failed',
-      });
+      } as any);
     } finally {
       inflight.delete(localJobId);
     }

@@ -21,6 +21,7 @@ import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { useSettings } from '../src/store/settingsStore';
 import { HatzClient } from '../src/lib/hatzClient';
 import { isWorkflow, type AppItem } from '../src/lib/appsTypes';
+import { track, captureError } from '../src/lib/telemetry';
 
 type Route = { key: 'apps' | 'workflows'; title: string };
 
@@ -67,6 +68,8 @@ export default function AppsScreen() {
         setItems(data);
       } catch (e: any) {
         setError(e?.message ?? 'Failed to load apps.');
+        track('apps_list_load_failed');
+        captureError(e, { where: 'apps.load' });
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -92,7 +95,9 @@ export default function AppsScreen() {
   const onItemPress = (item: AppItem) => {
     const id = (item as any).id;
     if (!id) return;
-    if (isWorkflow(item)) router.push(`/workflows/${id}` as any);
+    const kind = isWorkflow(item) ? 'workflow' : 'app';
+    track('app_opened', { kind });
+    if (kind === 'workflow') router.push(`/workflows/${id}` as any);
     else router.push(`/app/${id}` as any);
   };
 
@@ -161,7 +166,10 @@ export default function AppsScreen() {
 
       <TabView
         navigationState={{ index, routes }}
-        onIndexChange={setIndex}
+        onIndexChange={(i) => {
+          setIndex(i);
+          track('apps_tab_changed', { tab: routes[i].key });
+        }}
         initialLayout={{ width: layout.width }}
         renderScene={renderScene}
         renderTabBar={(props) => (

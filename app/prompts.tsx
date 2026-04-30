@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { usePrompts, PERSONAL_FOLDER_ID, DUBLOW_FOLDER_ID, Prompt } from '../src/store/promptsStore';
 import { hasPlaceholders } from '../src/lib/promptTemplate';
+import { track, captureError } from '../src/lib/telemetry';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 
 const FOLDER_ALL = '__all__';
@@ -53,6 +54,13 @@ export default function PromptsScreen() {
   const usePrompt = (p: Prompt) => {
     Haptics.selectionAsync().catch(() => {});
     recordUsage(p.id);
+    track('prompt_used', {
+      has_placeholders: hasPlaceholders(p.body),
+      folder_kind:
+        p.folderId === DUBLOW_FOLDER_ID ? 'dublow'
+        : p.folderId === PERSONAL_FOLDER_ID ? 'personal'
+        : 'custom',
+    });
     if (hasPlaceholders(p.body)) {
       router.push({ pathname: '/prompt-fill', params: { id: p.id } });
     } else {
@@ -87,6 +95,7 @@ export default function PromptsScreen() {
           style: 'destructive',
           onPress: () => {
             deleteFolder(folderId);
+            track('prompt_folder_deleted');
             if (activeFolderId === folderId) setActiveFolderId(FOLDER_ALL);
           },
         },
@@ -107,7 +116,10 @@ export default function PromptsScreen() {
               const n = (name || '').trim();
               if (!n) return;
               const id = createFolder(n);
-              if (id) setActiveFolderId(id);
+              if (id) {
+                setActiveFolderId(id);
+                track('prompt_folder_created');
+              }
             },
           },
         ],

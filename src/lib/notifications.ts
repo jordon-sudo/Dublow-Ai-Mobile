@@ -44,7 +44,9 @@ export async function ensureNotificationPermission(): Promise<boolean> {
   }
 }
 
-export async function notifyJobComplete(job: TrackedJob): Promise<void> {
+export async function notifyJobComplete(
+  job: Pick<TrackedJob, 'job_id' | 'app_name' | 'status'>,
+): Promise<void> {
   try {
     const granted = await ensureNotificationPermission();
     if (!granted) return;

@@ -25,6 +25,7 @@ import { isWorkflow } from '../../src/lib/appsTypes';
 import * as Crypto from 'expo-crypto';
 import { useWorkflowJobs } from '../../src/store/workflowJobsStore';
 import { startAppRun } from '../../src/lib/appRunRegistry';
+import { track, captureError } from '../../src/lib/telemetry';
 
 export default function AppRunnerScreen() {
   const theme = useTheme();
@@ -56,6 +57,8 @@ export default function AppRunnerScreen() {
       setApp(data);
     } catch (e: any) {
       setLoadError(e?.message ?? 'Failed to load app.');
+      track('app_detail_load_failed');
+      captureError(e, { where: 'app.load' });
     } finally {
       setLoading(false);
     }
@@ -73,35 +76,46 @@ export default function AppRunnerScreen() {
   }, [app, values]);
 
   const run = async () => {
-  if (!client || !app) return;
-  setRunning(true);
-  setRunError(null);
-  setResult(null);
-  try {
-    const id = (app as any).id ?? String(appId);
-    const localJobId = `app-${Crypto.randomUUID()}`;
+    if (!client || !app) return;
+    setRunning(true);
+    setRunError(null);
+    setResult(null);
+    try {
+      const id = (app as any).id ?? String(appId);
+      const localJobId = `app-${Crypto.randomUUID()}`;
 
-    await useWorkflowJobs.getState().trackAppJob({
-      job_id: localJobId,
-      app_id: id,
-      app_name: app.name,
-      inputs: values,
-    });
+      const inputCount = Object.keys(values).length;
+      const filledCount = Object.values(values).filter(
+        (v) => typeof v === 'string' ? v.trim().length > 0 : v != null,
+      ).length;
+      track('app_run_started', {
+        input_count: inputCount,
+        filled_count: filledCount,
+      });
 
-    startAppRun({
-      localJobId,
-      appId: id,
-      appName: app.name,
-      inputs: values,
-      client,
-    });
+      await useWorkflowJobs.getState().trackAppJob({
+        job_id: localJobId,
+        app_id: id,
+        app_name: app.name,
+        inputs: values,
+      });
 
-    router.replace(`/jobs/${localJobId}` as any);
-  } catch (e: any) {
-    setRunError(e?.message ?? 'Run failed.');
-    setRunning(false);
-  }
-};
+      startAppRun({
+        localJobId,
+        appId: id,
+        appName: app.name,
+        inputs: values,
+        client,
+      });
+
+      router.replace(`/jobs/${localJobId}` as any);
+    } catch (e: any) {
+      setRunError(e?.message ?? 'Run failed.');
+      setRunning(false);
+      track('app_run_start_failed');
+      captureError(e, { where: 'app.run' });
+    }
+  };
 
   const copyResult = async () => {
     if (!result) return;

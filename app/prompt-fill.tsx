@@ -15,6 +15,7 @@ import {
   humanizePlaceholder,
 } from '../src/lib/promptTemplate';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
+import { track } from '../src/lib/telemetry';
 
 export default function PromptFillScreen() {
   const theme = useTheme();
@@ -79,14 +80,24 @@ export default function PromptFillScreen() {
     }
     const resolved = substitutePlaceholders(prompt.body, values);
     recordUsage(prompt.id);
+    track('prompt_filled_submitted', {
+      mode: 'complete',
+      placeholder_count: placeholders.length,
+      filled_count: placeholders.filter((p) => (values[p] ?? '').trim().length > 0).length,
+    });
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     router.replace({ pathname: '/', params: { prefill: resolved } });
   };
 
   const submitAnyway = () => {
-    // Allow sending with partial fills — unknown placeholders are preserved by substitutePlaceholders.
+    // Allow sending with partial fills - unknown placeholders are preserved by substitutePlaceholders.
     const resolved = substitutePlaceholders(prompt.body, values);
     recordUsage(prompt.id);
+    track('prompt_filled_submitted', {
+      mode: 'as_is',
+      placeholder_count: placeholders.length,
+      filled_count: placeholders.filter((p) => (values[p] ?? '').trim().length > 0).length,
+    });
     Haptics.selectionAsync().catch(() => {});
     router.replace({ pathname: '/', params: { prefill: resolved } });
   };
