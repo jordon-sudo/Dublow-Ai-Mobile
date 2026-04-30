@@ -1,9 +1,9 @@
 {
   "expo": {
-    "name": "Hatz Chat",
+    "name": "Dublow-AI-Mobile",
     "slug": "hatz-chat",
-    "version": "0.3.4",
-    "scheme": "hatzchat",
+    "version": "0.0.64",
+    "scheme": "haztchat",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
@@ -21,7 +21,12 @@
       "package": "com.dublowdigital.hatzchat",
       "backgroundColor": "#000000"
     },
-    "plugins": [
+     "plugins": [
+      ["expo-media-library", {
+  "photosPermission": "Allow Hatz Chat to save generated images to your photo library.",
+  "savePhotosPermission": "Allow Hatz Chat to save generated images to your photo library.",
+  "isAccessMediaLocationEnabled": true
+}],
       "expo-router",
       "expo-secure-store",
       [
@@ -33,5 +38,6 @@
       ]
     ],
     "experiments": { "typedRoutes": true }
+  
   }
 }

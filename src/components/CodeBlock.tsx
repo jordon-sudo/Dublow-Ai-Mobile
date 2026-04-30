@@ -5,11 +5,23 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import * as Haptics from 'expo-haptics';
 import CodeHighlighter from 'react-native-code-highlighter';
-import { atomOneDark } from 'react-syntax-highlighter/dist/esm/styles/hljs';
-import { useTheme, spacing, radii, fontSize } from '../theme';
+import {
+  atomOneDark,
+  atomOneLight,
+} from 'react-syntax-highlighter/dist/esm/styles/hljs';
+import { useTheme, spacing, radii, fontSize, type Theme } from '../theme';
 
 const COLLAPSE_THRESHOLD = 20;
 const PREVIEW_LINES = 10;
+
+// Map theme modes to highlight.js styles. Extend here when adding new modes.
+const HLJS_STYLE_BY_MODE: Record<Theme['mode'], Record<string, any>> = {
+  dark: atomOneDark,
+  // light: atomOneLight, // enable when a light theme mode is added
+};
+
+// Fallback for modes not yet mapped (keeps TS and runtime safe).
+const FALLBACK_HLJS = atomOneDark;
 
 interface Props {
   code: string;
@@ -25,9 +37,28 @@ export default function CodeBlock({ code, language }: Props) {
   const lines = useMemo(() => code.replace(/\n$/, '').split('\n'), [code]);
   const isLong = lines.length > COLLAPSE_THRESHOLD;
   const hiddenCount = isLong ? lines.length - PREVIEW_LINES : 0;
-  const displayCode = isLong && !expanded
-    ? lines.slice(0, PREVIEW_LINES).join('\n')
-    : code.replace(/\n$/, '');
+  const displayCode =
+    isLong && !expanded
+      ? lines.slice(0, PREVIEW_LINES).join('\n')
+      : code.replace(/\n$/, '');
+
+  // Strip `background` and `backgroundColor` from EVERY token class in the
+  // hljs style object, not just the top-level `hljs` key. react-syntax-highlighter
+  // merges these into inline styles on nested <Text> nodes, so any one of them
+  // can paint a light surface over our themed wrapper.
+  const hljsStyle = useMemo(() => {
+    const base = HLJS_STYLE_BY_MODE[theme.mode] ?? FALLBACK_HLJS;
+    const out: Record<string, any> = {};
+    for (const key of Object.keys(base)) {
+      const { background, backgroundColor, ...rest } = (base as any)[key] ?? {};
+      out[key] = rest;
+    }
+    return out;
+  }, [theme.mode]);
+
+  // Derive subtle header/footer dividers from the theme border so they read
+  // correctly on both dark and (future) light surfaces.
+  const divider = theme.colors.border;
 
   const copy = async () => {
     await Clipboard.setStringAsync(code);
@@ -40,18 +71,28 @@ export default function CodeBlock({ code, language }: Props) {
     <View
       style={[
         styles.wrap,
-        { backgroundColor: '#282c34', borderColor: theme.colors.border },
+        {
+          backgroundColor: theme.colors.surfaceAlt,
+          borderColor: theme.colors.border,
+        },
       ]}
     >
-      <View style={[styles.header, { borderBottomColor: '#ffffff14' }]}>
-        <Text style={styles.langLabel}>{lang}</Text>
+      <View style={[styles.header, { borderBottomColor: divider }]}>
+        <Text style={[styles.langLabel, { color: theme.colors.textMuted }]}>
+          {lang}
+        </Text>
         <Pressable onPress={copy} style={styles.copyBtn} hitSlop={8}>
           <Ionicons
             name={copied ? 'checkmark' : 'copy-outline'}
             size={14}
-            color={copied ? '#4ade80' : '#cbd5e1'}
+            color={copied ? theme.colors.success : theme.colors.textMuted}
           />
-          <Text style={[styles.copyText, { color: copied ? '#4ade80' : '#cbd5e1' }]}>
+          <Text
+            style={[
+              styles.copyText,
+              { color: copied ? theme.colors.success : theme.colors.textMuted },
+            ]}
+          >
             {copied ? 'Copied' : 'Copy'}
           </Text>
         </Pressable>
@@ -60,16 +101,27 @@ export default function CodeBlock({ code, language }: Props) {
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={{ paddingVertical: spacing.sm, paddingHorizontal: spacing.md }}
+        contentContainerStyle={{
+          paddingVertical: spacing.sm,
+          paddingHorizontal: spacing.md,
+        }}
       >
         <CodeHighlighter
           language={lang}
-          hljsStyle={atomOneDark}
+          hljsStyle={hljsStyle}
           textStyle={{
+            backgroundColor: 'transparent',
             fontSize: 13,
             fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
           }}
-          containerStyle={{ backgroundColor: 'transparent', padding: 0 }}
+          containerStyle={{
+            backgroundColor: theme.colors.surfaceAlt,
+            padding: 0,
+          }}
+          scrollViewProps={{
+            style: { backgroundColor: theme.colors.surfaceAlt },
+            contentContainerStyle: { backgroundColor: theme.colors.surfaceAlt },
+          }}
         >
           {displayCode}
         </CodeHighlighter>
@@ -78,15 +130,17 @@ export default function CodeBlock({ code, language }: Props) {
       {isLong ? (
         <Pressable
           onPress={() => setExpanded((v) => !v)}
-          style={[styles.expandBtn, { borderTopColor: '#ffffff14' }]}
+          style={[styles.expandBtn, { borderTopColor: divider }]}
         >
           <Ionicons
             name={expanded ? 'chevron-up' : 'chevron-down'}
             size={14}
-            color="#cbd5e1"
+            color={theme.colors.textMuted}
           />
-          <Text style={styles.expandText}>
-            {expanded ? 'Show less' : `Show ${hiddenCount} more line${hiddenCount === 1 ? '' : 's'}`}
+          <Text style={[styles.expandText, { color: theme.colors.textMuted }]}>
+            {expanded
+              ? 'Show less'
+              : `Show ${hiddenCount} more line${hiddenCount === 1 ? '' : 's'}`}
           </Text>
         </Pressable>
       ) : null}
@@ -110,7 +164,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   langLabel: {
-    color: '#94a3b8',
     fontSize: fontSize.xs,
     fontWeight: '600',
     textTransform: 'lowercase',
@@ -132,5 +185,5 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  expandText: { color: '#cbd5e1', fontSize: fontSize.xs, fontWeight: '600' },
+  expandText: { fontSize: fontSize.xs, fontWeight: '600' },
 });

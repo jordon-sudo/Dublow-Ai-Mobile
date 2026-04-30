@@ -9,15 +9,15 @@ import {
   Pressable,
   StyleSheet,
   ActivityIndicator,
-  Linking,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Stack, router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
-import Markdown from 'react-native-markdown-display';
+import * as Haptics from 'expo-haptics';
 import { useTheme, spacing, radii, fontSize } from '../../src/theme';
+import AssistantMarkdown from '../../src/components/AssistantMarkdown';
+import JobAttachment from '../../src/components/JobAttachment';
 import { useSettings } from '../../src/store/settingsStore';
 import { HatzClient } from '../../src/lib/hatzClient';
 import { useWorkflowJobs } from '../../src/store/workflowJobsStore';
@@ -28,6 +28,7 @@ import {
 } from '../../src/lib/appsTypes';
 
 const POLL_INTERVAL_MS = 3000;
+const COPIED_FLASH_MS = 1500;
 
 export default function JobScreen() {
   const theme = useTheme();
@@ -165,6 +166,65 @@ export default function JobScreen() {
   );
 }
 
+/* ------------------------------ copy button ----------------------------- */
+
+function CopyButton({
+  getText,
+  align = 'flex-end',
+}: {
+  getText: () => string | null | undefined;
+  align?: 'flex-start' | 'flex-end' | 'center';
+}) {
+  const theme = useTheme();
+  const [copied, setCopied] = useState(false);
+  const mountedRef = useRef(true);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const onPress = async () => {
+    const text = getText();
+    if (!text) return;
+    try {
+      await Clipboard.setStringAsync(text);
+      await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch {
+      // Clipboard failures are non-fatal; no-op.
+    }
+    if (!mountedRef.current) return;
+    setCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      if (mountedRef.current) setCopied(false);
+    }, COPIED_FLASH_MS);
+  };
+
+  const color = copied ? theme.colors.success : theme.colors.textMuted;
+
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={10}
+      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: align }}
+    >
+      <Ionicons
+        name={copied ? 'checkmark' : 'copy-outline'}
+        size={14}
+        color={color}
+      />
+      <Text style={{ color, fontSize: fontSize.xs }}>
+        {copied ? 'Copied' : 'Copy'}
+      </Text>
+    </Pressable>
+  );
+}
+
 /* ------------------------------ app output ----------------------------- */
 
 function AppOutputBlock({
@@ -176,10 +236,6 @@ function AppOutputBlock({
   const isRunning = !isTerminalStatus(job.status);
   const failed = job.status === 'failed';
   const text = failed ? job.error ?? 'Run failed.' : job.output_data ?? '';
-
-  const copy = async () => {
-    if (text) await Clipboard.setStringAsync(text);
-  };
 
   if (isRunning) {
     return (
@@ -212,23 +268,14 @@ function AppOutputBlock({
         <Text style={{ color: failed ? theme.colors.danger : theme.colors.text, fontWeight: '700' }}>
           {failed ? 'Error' : 'Output'}
         </Text>
-        {text ? (
-          <Pressable
-            onPress={copy}
-            style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
-            hitSlop={6}
-          >
-            <Ionicons name="copy-outline" size={14} color={theme.colors.textMuted} />
-            <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs }}>Copy</Text>
-          </Pressable>
-        ) : null}
+        {text ? <CopyButton getText={() => text} align="flex-end" /> : null}
       </View>
       {failed ? (
         <Text selectable style={{ color: theme.colors.danger, fontSize: fontSize.sm, lineHeight: 22 }}>
           {text || '(no output)'}
         </Text>
       ) : text ? (
-        <Markdown style={mdStyles(theme) as any}>{text}</Markdown>
+        <AssistantMarkdown>{text}</AssistantMarkdown>
       ) : (
         <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.sm }}>(no output)</Text>
       )}
@@ -251,7 +298,6 @@ function StepCard({
 }) {
   const theme = useTheme();
   const [expanded, setExpanded] = useState(false);
-  const [fetchingUrl, setFetchingUrl] = useState(false);
 
   const statusColor =
     step.status === 'complete'
@@ -276,24 +322,7 @@ function StepCard({
   const textIsMarkdown =
     typeof step.output_data === 'string' && step.output_type !== 'json';
 
-  const openFile = async () => {
-    if (!client) return;
-    try {
-      setFetchingUrl(true);
-      const { url } = await client.getWorkflowPresignedUrl(jobId, step.step_id);
-      const supported = await Linking.canOpenURL(url);
-      if (supported) await Linking.openURL(url);
-      else Alert.alert('Cannot open URL', url);
-    } catch (e: any) {
-      Alert.alert('Download failed', e?.message ?? 'Unknown error.');
-    } finally {
-      setFetchingUrl(false);
-    }
-  };
-
-  const copyText = async () => {
-    if (textOutput) await Clipboard.setStringAsync(textOutput);
-  };
+  
 
   return (
     <View
@@ -319,47 +348,24 @@ function StepCard({
 
       {expanded ? (
         <View style={styles.stepBody}>
-          {isFileOutput ? (
-            <Pressable
-              onPress={openFile}
-              disabled={fetchingUrl || step.status !== 'complete'}
-              style={[
-                styles.actionBtn,
-                {
-                  backgroundColor:
-                    step.status === 'complete'
-                      ? theme.colors.primary
-                      : theme.colors.surfaceAlt,
-                },
-              ]}
-            >
-              {fetchingUrl ? (
-                <ActivityIndicator color={theme.colors.primaryText} />
-              ) : (
-                <>
-                  <Ionicons
-                    name="download-outline"
-                    size={16}
-                    color={theme.colors.primaryText}
-                  />
-                  <Text style={[styles.actionText, { color: theme.colors.primaryText }]}>
-                    Open file
-                  </Text>
-                </>
-              )}
-            </Pressable>
+          {isFileOutput && step.status === 'complete' ? (
+            <JobAttachment
+              jobId={jobId}
+              stepId={step.step_id}
+              outputType={step.output_type}
+              client={client}
+            />
+          ) : isFileOutput ? (
+            <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.sm }}>
+              Attachment will appear here when the step completes.
+            </Text>
           ) : null}
 
           {textOutput ? (
             <View style={styles.outputBlock}>
-              <Pressable onPress={copyText} style={styles.copyBtn} hitSlop={6}>
-                <Ionicons name="copy-outline" size={14} color={theme.colors.textMuted} />
-                <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs }}>
-                  Copy
-                </Text>
-              </Pressable>
+              <CopyButton getText={() => textOutput} align="flex-end" />
               {textIsMarkdown ? (
-                <Markdown style={mdStyles(theme) as any}>{textOutput}</Markdown>
+                <AssistantMarkdown>{textOutput}</AssistantMarkdown>
               ) : (
                 <Text
                   selectable
@@ -384,53 +390,6 @@ function StepCard({
       ) : null}
     </View>
   );
-}
-
-/* ------------------------------ markdown styles ------------------------------ */
-
-function mdStyles(theme: ReturnType<typeof useTheme>) {
-  return {
-    body: { color: theme.colors.text, fontSize: fontSize.sm, lineHeight: 22 },
-    heading1: { color: theme.colors.text, fontSize: 22, fontWeight: '700', marginTop: 12, marginBottom: 6 },
-    heading2: { color: theme.colors.text, fontSize: 19, fontWeight: '700', marginTop: 10, marginBottom: 4 },
-    heading3: { color: theme.colors.text, fontSize: 17, fontWeight: '600', marginTop: 8, marginBottom: 4 },
-    strong: { color: theme.colors.text, fontWeight: '700' },
-    em: { fontStyle: 'italic' },
-    bullet_list: { marginVertical: 4 },
-    ordered_list: { marginVertical: 4 },
-    list_item: { marginVertical: 2, color: theme.colors.text },
-    paragraph: { color: theme.colors.text, marginVertical: 4 },
-    code_inline: {
-      backgroundColor: theme.colors.border,
-      color: theme.colors.text,
-      paddingHorizontal: 4,
-      borderRadius: 4,
-      fontFamily: 'Courier',
-    },
-    code_block: {
-      backgroundColor: theme.colors.border,
-      color: theme.colors.text,
-      padding: 10,
-      borderRadius: 6,
-      fontFamily: 'Courier',
-    },
-    fence: {
-      backgroundColor: theme.colors.border,
-      color: theme.colors.text,
-      padding: 10,
-      borderRadius: 6,
-      fontFamily: 'Courier',
-    },
-    link: { color: theme.colors.primary, textDecorationLine: 'underline' },
-    blockquote: {
-      backgroundColor: theme.colors.surfaceAlt,
-      borderLeftColor: theme.colors.primary,
-      borderLeftWidth: 3,
-      paddingLeft: spacing.sm,
-      paddingVertical: 4,
-    },
-    hr: { backgroundColor: theme.colors.border, height: 1, marginVertical: 10 },
-  };
 }
 
 /* -------------------------------- styles ------------------------------- */
@@ -505,10 +464,4 @@ const styles = StyleSheet.create({
   actionText: { fontSize: fontSize.md, fontWeight: '700' },
 
   outputBlock: { gap: spacing.xs },
-  copyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    alignSelf: 'flex-end',
-  },
 });

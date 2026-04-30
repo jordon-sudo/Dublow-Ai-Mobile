@@ -527,3 +527,81 @@ Notes
 - Quote in New Chat intentionally forks instead of seeding the current chat, per product direction.
 - Save as Prompt writes to PERSONAL_FOLDER_ID; user can immediately jump to prompt-edit for refinement.
 
+v0.0.58 - Working copy button on job detail screen
+
+Added
+- Shared CopyButton component in app/jobs/[jobId].tsx providing haptic success feedback and a 1500ms "Copied" label-and-icon flip.
+
+Changed
+- AppOutputBlock now delegates copy UI to CopyButton instead of a silent inline Pressable.
+- StepCard now delegates copy UI to CopyButton, removing the local copyText handler.
+- Copy button hitSlop widened from 6 to 10 for reliable tap targeting.
+
+Removed
+- Dead styles.copyBtn entry from the StyleSheet; CopyButton owns its own layout.
+
+Dependencies
+- Added runtime import of expo-haptics (already present in the project; no install required).
+
+Notes
+- JS-only change. No native rebuild needed.
+
+v0.0.59 - Header new-chat button parity with drawer
+
+Changed
+- app/index.tsx: header pencil button no longer destroys the active conversation. It now calls useConversations.newConversation(), matching the behavior of the "+ New" button in ConversationsDrawer. No confirmation dialog.
+- Added newConversation selector from useConversations to the ChatScreen component.
+- Replaced confirmClear with handleNewChat, which also resets local input and fileNames state so the composer is clean on the newly-activated conversation.
+
+Removed
+- Alert.alert "Start a new chat?" destructive confirmation flow (no longer needed; the old conversation is preserved in history).
+
+
+v0.0.60 - Unified markdown rendering on job detail screen
+
+Changed
+- app/jobs/[jobId].tsx: AppOutputBlock and StepCard now render markdown through the shared AssistantMarkdown component instead of a local react-native-markdown-display instance with inline styles. Jobs output now matches the chat screen's rendering: fenced code blocks via CodeBlock, table support, proper inline code, consistent heading scale.
+
+Removed
+- Local mdStyles(theme) helper in app/jobs/[jobId].tsx (superseded by AssistantMarkdown's internal styles).
+- Direct import of react-native-markdown-display from app/jobs/[jobId].tsx.
+
+v0.0.61 - Theme-driven CodeBlock styling
+
+Changed
+- src/components/CodeBlock.tsx: replaced hardcoded atom-one-dark background (#282c34) and slate-colored chrome with theme-driven colors. Background now uses theme.colors.surfaceAlt, dividers use theme.colors.border, header/copy/expand text uses theme.colors.textMuted, and the "Copied" success state uses theme.colors.success.
+- Introduced HLJS_STYLE_BY_MODE, a Theme['mode']-keyed map selecting the highlight.js style (atomOneDark for dark mode today). This forces TypeScript to require a mapping entry when new theme modes are added.
+
+Added
+- Import of atomOneLight from react-syntax-highlighter, staged for a future light theme mode (currently unused).
+
+Notes
+- No API changes to CodeBlock props.
+- When a light theme mode is added, uncomment the light entry in HLJS_STYLE_BY_MODE and widen Theme['mode'] accordingly.
+
+v0.0.62 - Dark-theme code blocks inside markdown output
+
+Changed
+- src/components/AssistantMarkdown.tsx: added a code_block render rule that routes indented (4-space) code blocks through CodeBlock, matching fence behavior. Previously these fell through to react-native-markdown-display's default renderer with a light gray background.
+- Added defensive transparent-background overrides for code_block and fence in mergedStyle so the library's default light styling cannot bleed through during layout.
+
+v0.0.63 - Transparent hljs background so CodeBlock wrapper color shows through
+
+Fixed
+- src/components/CodeBlock.tsx: highlight.js style objects carry a hard-coded background on their `hljs` key (atomOneDark = #282c34, atomOneLight = #fafafa) which react-native-code-highlighter paints over the themed wrapper. The selected hljs style is now spread with background and backgroundColor forced to transparent so the themed wrapper (theme.colors.surfaceAlt) is the visible background.
+
+Changed
+- hljsStyle is now memoized by theme.mode via useMemo.
+
+v0.0.64 - Eliminated white background inside markdown code blocks
+
+Fixed
+- src/components/CodeBlock.tsx: code block interiors no longer render on a light background inside markdown output. react-syntax-highlighter hljs style objects carry background/backgroundColor on multiple token classes (not just the top-level `hljs` key), and react-native-code-highlighter merges those into inline styles on nested <Text> and container nodes, painting over the themed wrapper.
+
+Changed
+- hljsStyle is now deep-stripped: every token class in the selected highlight.js style has `background` and `backgroundColor` removed via useMemo, keyed by theme.mode.
+- <CodeHighlighter> now receives containerStyle.backgroundColor = theme.colors.surfaceAlt, textStyle.backgroundColor = 'transparent', and scrollViewProps with both style and contentContainerStyle backgrounds set to theme.colors.surfaceAlt, guaranteeing the themed surface shows through at every layer the library exposes.
+
+Notes
+- JS-only change. No native rebuild required.
+- When a light theme mode is added, the same deep-strip logic will apply to atomOneLight automatically; only the HLJS_STYLE_BY_MODE map and Theme['mode'] union need to be updated.

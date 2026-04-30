@@ -4,6 +4,7 @@ import { View, Text, StyleSheet, Platform } from 'react-native';
 import Markdown, { RenderRules, MarkdownProps } from 'react-native-markdown-display';
 import { useTheme, spacing, radii, fontSize } from '../theme';
 import CodeBlock from './CodeBlock';
+import MarkdownImage from './MarkdownImage';
 
 interface Props {
   children: string;
@@ -21,6 +22,22 @@ function AssistantMarkdownImpl({ children, style }: Props) {
       return <CodeBlock key={node.key} code={content} language={language} />;
     },
 
+    // Indented code blocks (4-space). Same treatment as fences.
+    code_block: (node) => {
+      const content = String(node.content ?? '').replace(/\n$/, '');
+      return <CodeBlock key={node.key} code={content} language="" />;
+    },
+
+    // Markdown images: ![alt](url)
+    // Route to MarkdownImage so we get tap-to-expand, long-press menu,
+    // and Save to Photos / Files / Share / Copy Link.
+    image: (node) => {
+      const src = String((node as any).attributes?.src ?? '');
+      const alt = String((node as any).attributes?.alt ?? '');
+      if (!src) return null;
+      return <MarkdownImage key={node.key} url={src} alt={alt || undefined} />;
+    },
+    
     // Inline code: `foo`
     code_inline: (node, _children, _parent, styles) => (
       <Text
@@ -127,6 +144,11 @@ function AssistantMarkdownImpl({ children, style }: Props) {
     list_item: { marginVertical: 2, color: theme.colors.text },
     hr: { backgroundColor: theme.colors.border, height: StyleSheet.hairlineWidth, marginVertical: spacing.md },
     paragraph: { marginTop: 0, marginBottom: spacing.sm },
+    // Defensive: react-native-markdown-display ships light-gray defaults for
+    // these; CodeBlock owns rendering, but the wrapper style still applies
+    // briefly during layout. Force transparent so nothing flashes white.
+    code_block: { backgroundColor: 'transparent', padding: 0, margin: 0 },
+    fence: { backgroundColor: 'transparent', padding: 0, margin: 0 },
     ...(style ?? {}),
   } as MarkdownProps['style'];
 

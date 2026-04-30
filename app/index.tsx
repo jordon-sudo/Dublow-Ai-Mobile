@@ -78,6 +78,7 @@ export default function ChatScreen() {
   } = useChat();
 
   const activeId = useConversations((s) => s.activeId);
+  const newConversation = useConversations((s) => s.newConversation);
   const truncateActiveAt = useConversations((s) => s.truncateActiveAt);
   const removeLastAssistantMessage = useConversations((s) => s.removeLastAssistantMessage);
   const forkActiveAsNew = useConversations((s) => s.forkActiveAsNew);
@@ -259,16 +260,17 @@ export default function ChatScreen() {
     await streamCompletion(selectedModel);
   };
 
-  const confirmClear = () => {
-    if (messages.length === 0) return;
-    Alert.alert('Start a new chat?', 'This will delete the current conversation.', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'New Chat',
-        style: 'destructive',
-        onPress: () => { clear(); setFileNames({}); },
-      },
-    ]);
+  /**
+   * Mirrors the "+ New" button in ConversationsDrawer: spins up a fresh
+   * conversation without destroying the current one. No confirmation —
+   * the previous chat is preserved in history and can be reopened from
+   * the drawer.
+   */
+  const handleNewChat = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    newConversation();
+    setInput('');
+    setFileNames({});
   };
 
   // -------------------- Message-level action handlers --------------------
@@ -534,7 +536,7 @@ export default function ChatScreen() {
             <Ionicons name="apps-outline" size={22} color={theme.colors.text} />
           </Pressable>
         </Link>
-        <Pressable onPress={confirmClear} style={styles.iconBtn} hitSlop={8}>
+        <Pressable onPress={handleNewChat} style={styles.iconBtn} hitSlop={8}>
           <Ionicons name="create-outline" size={22} color={theme.colors.text} />
         </Pressable>
         <Link href="/settings" asChild>
