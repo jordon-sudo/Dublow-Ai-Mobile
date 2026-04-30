@@ -10,7 +10,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
-import { useSettings } from '../src/store/settingsStore';
+import { useSettings, ThemeMode } from '../src/store/settingsStore';
+import ModelPickerSheet from '../src/components/ModelPickerSheet';
 import { usePrompts } from '../src/store/promptsStore';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { groupedTools, ToolDef } from '../src/lib/tools';
@@ -23,13 +24,20 @@ export default function SettingsScreen() {
     systemPrompt, setSystemPrompt,
     defaultTools, setDefaultTools,
     defaultAutoTools, setDefaultAutoTools,
+    defaultModelId, setDefaultModelId,
+    models,
+    themeMode, setThemeMode,
   } = useSettings();
+
+  const defaultModelLabel =
+    models.find((m) => m.id === defaultModelId)?.label ?? 'Not set';
 
   const exportPromptsJSON = usePrompts((s) => s.exportJSON);
   const importPromptsJSON = usePrompts((s) => s.importJSON);
 
   const [promptDraft, setPromptDraft] = useState(systemPrompt);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [defaultModelPickerOpen, setDefaultModelPickerOpen] = useState(false);
 
   const savePrompt = () => setSystemPrompt(promptDraft);
 
@@ -160,6 +168,55 @@ export default function SettingsScreen() {
       />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
 
+        <Section
+          title="Appearance"
+          theme={theme}
+          caption="Choose how Dublow looks. System follows your device setting."
+        >
+          <View
+            style={[
+              styles.segment,
+              { borderColor: theme.colors.border, backgroundColor: theme.colors.surface },
+            ]}
+          >
+            {(['light', 'dark', 'system'] as ThemeMode[]).map((m) => {
+              const active = themeMode === m;
+              const icon =
+                m === 'light'
+                  ? 'sunny-outline'
+                  : m === 'dark'
+                  ? 'moon-outline'
+                  : 'phone-portrait-outline';
+              const label = m === 'system' ? 'System' : m === 'light' ? 'Light' : 'Dark';
+              return (
+                <Pressable
+                  key={m}
+                  onPress={() => setThemeMode(m)}
+                  style={[
+                    styles.segmentItem,
+                    active && { backgroundColor: theme.colors.primarySoft },
+                  ]}
+                >
+                  <Ionicons
+                    name={icon as any}
+                    size={16}
+                    color={active ? theme.colors.primary : theme.colors.textMuted}
+                  />
+                  <Text
+                    style={{
+                      color: active ? theme.colors.primary : theme.colors.text,
+                      fontSize: fontSize.sm,
+                      fontWeight: active ? '700' : '600',
+                    }}
+                  >
+                    {label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </Section>
+
         <Section title="Account" theme={theme}>
           <Pressable
             onPress={() => router.push('/api-key')}
@@ -229,6 +286,38 @@ export default function SettingsScreen() {
               <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Export JSON</Text>
             </Pressable>
           </View>
+        </Section>
+
+        <Section
+          title="Default Model"
+          theme={theme}
+          caption="Every new chat starts with this model. You can override per-chat at any time."
+        >
+          <Pressable
+            onPress={() => setDefaultModelPickerOpen(true)}
+            style={[styles.row, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
+          >
+            <Ionicons name="cube-outline" size={18} color={theme.colors.textMuted} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: theme.colors.text, fontSize: fontSize.md, fontWeight: '600' }}>
+                {defaultModelLabel}
+              </Text>
+              <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                {defaultModelId ?? 'Tap to choose'}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={theme.colors.textMuted} />
+          </Pressable>
+
+          {defaultModelId ? (
+            <Pressable
+              onPress={() => setDefaultModelId(null)}
+              style={[styles.secondaryBtn, { borderColor: theme.colors.border, marginTop: spacing.sm }]}
+            >
+              <Ionicons name="close-circle-outline" size={16} color={theme.colors.text} />
+              <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Clear default</Text>
+            </Pressable>
+          ) : null}
         </Section>
 
         <Section title="Tool Defaults" theme={theme}
@@ -344,6 +433,19 @@ export default function SettingsScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      <ModelPickerSheet
+        visible={defaultModelPickerOpen}
+        onClose={() => setDefaultModelPickerOpen(false)}
+        initialSelectedId={defaultModelId}
+        title="Default Model"
+        caption="This model will be used for every new chat."
+        includeAgents={false}
+        onConfirm={(id) => {
+          void setDefaultModelId(id);
+          setDefaultModelPickerOpen(false);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -425,5 +527,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.md, paddingVertical: spacing.md,
     borderRadius: radii.md, borderWidth: StyleSheet.hairlineWidth,
+  },
+  segment: {
+    flexDirection: 'row',
+    borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 4,
+    gap: 4,
+  },
+  segmentItem: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: radii.sm,
   },
 });

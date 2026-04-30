@@ -12,7 +12,7 @@
 //     onConfirm={(modelId) => { setShow(false); regenerate(modelId); }}
 //   />
 import { useMemo, useState } from 'react';
-import { Modal, Pressable, View, Text, StyleSheet, ScrollView } from 'react-native';
+import { Modal, Pressable, View, Text, StyleSheet, ScrollView, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings, TargetGroup, PickTarget } from '../store/settingsStore';
@@ -69,21 +69,34 @@ export default function ModelPickerSheet({
   const [selectedId, setSelectedId] = useState<string | null>(
     initialSelectedId ?? settingsSelectedModel ?? null,
   );
+  const [query, setQuery] = useState('');
 
-  // If the caller passes a new initialSelectedId while the sheet is
-  // closed, pick it up the next time it opens. Using useMemo off
-  // `visible` gives us that "on open" reset cleanly.
+  // Reset selection and clear the search when the sheet opens.
   useMemo(() => {
     if (visible) {
       setSelectedId(initialSelectedId ?? settingsSelectedModel ?? null);
+      setQuery('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
   const groups: TargetGroup[] = useMemo(() => {
     const all = getGroupedTargets();
-    return includeAgents ? all : all.filter((g) => g.kind !== 'agent');
-  }, [getGroupedTargets, includeAgents]);
+    const scoped = includeAgents ? all : all.filter((g) => g.kind !== 'agent');
+    const q = query.trim().toLowerCase();
+    if (!q) return scoped;
+    // Filter items by label, id, or provider. Drop groups that end up empty
+    // so the list does not render stray headers.
+    return scoped
+      .map((g) => ({
+        ...g,
+        items: g.items.filter((it) => {
+          const hay = `${it.label} ${it.id} ${it.provider ?? ''}`.toLowerCase();
+          return hay.includes(q);
+        }),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [getGroupedTargets, includeAgents, query]);
 
   const handleConfirm = () => {
     if (!selectedId) return;
@@ -118,8 +131,29 @@ export default function ModelPickerSheet({
               ) : null}
             </View>
 
+            {/* Search */}
+            <View
+              style={[
+                styles.searchWrap,
+                { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border },
+              ]}
+            >
+              <Ionicons name="search" size={16} color={theme.colors.textMuted} />
+              <TextInput
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search models"
+                placeholderTextColor={theme.colors.textMuted}
+                style={[styles.searchInput, { color: theme.colors.text }]}
+                autoCorrect={false}
+                autoCapitalize="none"
+                returnKeyType="search"
+                clearButtonMode="while-editing"
+              />
+            </View>
+
             {/* Grouped list */}
-            <ScrollView style={{ maxHeight: 520 }}>
+            <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled">
               {groups.length === 0 ? (
                 <View style={styles.emptyWrap}>
                   <Ionicons name="cloud-offline-outline" size={28} color={theme.colors.textMuted} />
@@ -238,7 +272,23 @@ const styles = StyleSheet.create({
   },
   header: {
     paddingHorizontal: spacing.sm,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
+  },
+  searchWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 8,
+    borderRadius: radii.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: fontSize.md,
+    paddingVertical: 0,
   },
   title: {
     fontSize: fontSize.lg,

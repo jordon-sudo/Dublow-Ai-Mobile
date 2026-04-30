@@ -25,6 +25,7 @@ import type { StreamStatus } from '../src/lib/hatzClient';
 import ConversationsDrawer from '../src/components/ConversationsDrawer';
 import MessageActionSheet, { MessageAction } from '../src/components/MessageActionSheet';
 import ModelPickerSheet from '../src/components/ModelPickerSheet';
+import ChatEmptyState from '../src/components/ChatEmptyState';
 import { copyText, shareText, buildQuoteMarkdown, deriveTitleFromMessage } from '../src/lib/messageActions';
 
 const ACCEPTED_EXTENSIONS = [
@@ -69,7 +70,7 @@ export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const {
     apiKey, selectedModel, models, apps, getClient, setSelectedModel,
-    getGroupedTargets, defaultTools, defaultAutoTools,
+    getGroupedTargets, defaultTools, defaultAutoTools, defaultModelId,
   } = useSettings();
   const {
     messages, attachedFileIds, activeTools, autoTools,
@@ -96,6 +97,7 @@ export default function ChatScreen() {
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [targetPickerOpen, setTargetPickerOpen] = useState(false);
+  const [targetPickerQuery, setTargetPickerQuery] = useState('');
   const [toolsPickerOpen, setToolsPickerOpen] = useState(false);
   const listRef = useRef<FlatList>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -119,16 +121,22 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // When the user switches conversations, mirror the conversation's last-used
-  // model into the global selector. New conversations have no modelId set, so
-  // they simply inherit whatever the selector is already showing — no reset.
+  // When the user switches conversations, resolve which model the selector
+  // should show. Priority:
+  //   1. The conversation's own modelId (user-set, most specific).
+  //   2. The user's configured default model (Settings → Default Model).
+  //   3. Leave the selector on whatever it already was (last-used global).
+  // Case 2 is what makes "force default on new conversations" work: a brand
+  // new chat has no modelId, so it snaps to the configured default. Once the
+  // user picks a different model in that chat, patchActive writes modelId
+  // and case 1 takes over on the next visit.
   useEffect(() => {
     if (!activeId) return;
     const conv = useConversations.getState().getActive();
     const convModel = conv?.modelId;
-    if (convModel && convModel !== selectedModel) {
-      // Fire-and-forget; setSelectedModel persists prefs, we don't need to await.
-      void setSelectedModel(convModel);
+    const target = convModel ?? defaultModelId ?? null;
+    if (target && target !== selectedModel) {
+      void setSelectedModel(target);
     }
     // Intentionally depend only on activeId. We do not want this to re-run
     // when selectedModel changes (that would fight user selections mid-chat).
@@ -287,6 +295,38 @@ export default function ChatScreen() {
     newConversation();
     setInput('');
     setFileNames({});
+  };
+
+  /** Empty-state action: jump to the prompt library. */
+  const handleChoosePrompt = () => {
+    Haptics.selectionAsync().catch(() => {});
+    router.push('/prompts');
+  };
+
+  /**
+   * Empty-state action: switch to the Gemini 3 Pro Image model.
+   * We resolve it by label-match rather than hardcoding an id, so changes
+   * in the model slug upstream don't silently break this button.
+   */
+  const handleImageGeneration = () => {
+    const imageModel = models.find((m) => {
+      const lbl = (m.label ?? '').toLowerCase();
+      const id = (m.id ?? '').toLowerCase();
+      const hay = `${lbl} ${id}`;
+      return hay.includes('gemini') && hay.includes('image');
+    });
+    if (!imageModel) {
+      Alert.alert(
+        'Image model unavailable',
+        'Gemini 3 Pro Image was not found in your model list. Check your API key and connection, or pick an image-capable model from the model picker.',
+      );
+      return;
+    }
+    Haptics.selectionAsync().catch(() => {});
+    void setSelectedModel(imageModel.id);
+    // Persist the choice on the active conversation so switching away and
+    // back restores image mode.
+    useConversations.getState().patchActive({ modelId: imageModel.id });
   };
 
   // -------------------- Message-level action handlers --------------------
@@ -576,9 +616,19 @@ export default function ChatScreen() {
           ref={listRef}
           data={messages}
           keyExtractor={(_, i) => String(i)}
-          contentContainerStyle={{ padding: spacing.md, paddingBottom: spacing.lg }}
+          contentContainerStyle={[
+            { padding: spacing.md, paddingBottom: spacing.lg },
+            messages.length === 0 && { flexGrow: 1 },
+          ]}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-          ListEmptyComponent={<View />}
+          ListEmptyComponent={
+            <ChatEmptyState
+              modelLabel={currentTarget?.label ?? 'Select a model'}
+              onPickModel={() => setTargetPickerOpen(true)}
+              onChoosePrompt={handleChoosePrompt}
+              onImageGeneration={handleImageGeneration}
+            />
+          }
           extraData={queueState}
           renderItem={({ item, index }) => {
             const isUser = item.role === 'user';
@@ -653,7 +703,7 @@ export default function ChatScreen() {
           {
             backgroundColor: theme.colors.surface,
             borderColor: theme.colors.border,
-            paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.sm,
+            paddingBottom: 10,
           },
         ]}>
           <View style={styles.inputRow}>
@@ -738,8 +788,51 @@ export default function ChatScreen() {
           >
             <View style={[styles.modalHandle, { backgroundColor: theme.colors.border }]} />
             <Text style={[styles.modalTitle, { color: theme.colors.text }]}>Select Model or Agent</Text>
-            <ScrollView style={{ maxHeight: 520 }}>
-              {getGroupedTargets().map((group) => (
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: spacing.xs,
+                paddingHorizontal: spacing.sm,
+                paddingVertical: 8,
+                borderRadius: radii.md,
+                borderWidth: StyleSheet.hairlineWidth,
+                borderColor: theme.colors.border,
+                backgroundColor: theme.colors.surfaceAlt,
+                marginHorizontal: spacing.sm,
+                marginBottom: spacing.sm,
+              }}
+            >
+              <Ionicons name="search" size={16} color={theme.colors.textMuted} />
+              <TextInput
+                value={targetPickerQuery}
+                onChangeText={setTargetPickerQuery}
+                placeholder="Search models"
+                placeholderTextColor={theme.colors.textMuted}
+                style={{ flex: 1, color: theme.colors.text, fontSize: fontSize.md, paddingVertical: 0 }}
+                autoCorrect={false}
+                autoCapitalize="none"
+                returnKeyType="search"
+                clearButtonMode="while-editing"
+              />
+            </View>
+
+            <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled">
+              {getGroupedTargets()
+                .map((group) => {
+                  const q = targetPickerQuery.trim().toLowerCase();
+                  if (!q) return group;
+                  return {
+                    ...group,
+                    items: group.items.filter((m) => {
+                      const hay = `${m.label} ${m.id} ${(m as any).provider ?? ''}`.toLowerCase();
+                      return hay.includes(q);
+                    }),
+                  };
+                })
+                .filter((group) => group.items.length > 0)
+                .map((group) => (
                 <View key={group.title} style={{ marginBottom: spacing.md }}>
                   <Text style={[styles.groupHeader, { color: theme.colors.textMuted }]}>{group.title}</Text>
                   {group.items.map((m) => {

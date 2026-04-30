@@ -9,18 +9,24 @@ const USER_EMAIL_SLOT = 'hatz_user_email';
 const USER_HASH_ID_SLOT = 'hatz_user_hash_id';
 const PREFS_KEY = 'hatz_prefs_v2';
 
+export type ThemeMode = 'dark' | 'light' | 'system';
+
 interface Prefs {
   selectedModel: string | null;
+  defaultModelId: string | null;
   systemPrompt: string;
   defaultTools: string[];
   defaultAutoTools: boolean;
+  themeMode: ThemeMode;
 }
 
 const DEFAULT_PREFS: Prefs = {
   selectedModel: null,
+  defaultModelId: null,
   systemPrompt: '',
   defaultTools: [],
   defaultAutoTools: true,
+  themeMode: 'dark',
 };
 
 export interface PickTarget extends ModelInfo {}
@@ -40,16 +46,20 @@ interface SettingsState {
   apps: AppInfo[];
 
   selectedModel: string | null;
+  defaultModelId: string | null;
   systemPrompt: string;
   defaultTools: string[];
   defaultAutoTools: boolean;
+  themeMode: ThemeMode;
 
   hydrate: () => Promise<void>;
   setApiKey: (key: string | null) => Promise<void>;
   setAuth: (args: { apiKey: string; userEmail: string; userHashId: string }) => Promise<void>;
   signOut: () => Promise<void>;
   setSelectedModel: (id: string) => Promise<void>;
+  setDefaultModelId: (id: string | null) => Promise<void>;
   setSystemPrompt: (s: string) => Promise<void>;
+  setThemeMode: (m: ThemeMode) => Promise<void>;
   setDefaultTools: (t: string[]) => Promise<void>;
   setDefaultAutoTools: (b: boolean) => Promise<void>;
   refreshCatalog: () => Promise<void>;
@@ -122,43 +132,86 @@ export const useSettings = create<SettingsState>((set, get) => ({
     });
   },
 
+  // Small helper so every setter persists the complete Prefs snapshot
+  // without restating every field. Each setter calls set(...) first,
+  // then this reads the fresh state back out.
+  // (Defined as a closure over `get()` by each setter below.)
+
   setSelectedModel: async (id) => {
     set({ selectedModel: id });
+    const s = get();
     await savePrefs({
-      selectedModel: id,
-      systemPrompt: get().systemPrompt,
-      defaultTools: get().defaultTools,
-      defaultAutoTools: get().defaultAutoTools,
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,   
     });
   },
 
-  setSystemPrompt: async (s) => {
-    set({ systemPrompt: s });
+  setDefaultModelId: async (id) => {
+    set({ defaultModelId: id });
+    const s = get();
     await savePrefs({
-      selectedModel: get().selectedModel,
-      systemPrompt: s,
-      defaultTools: get().defaultTools,
-      defaultAutoTools: get().defaultAutoTools,
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,   
+    });
+  },
+
+  setSystemPrompt: async (value) => {
+    set({ systemPrompt: value });
+    const s = get();
+    await savePrefs({
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,  
     });
   },
 
   setDefaultTools: async (t) => {
     set({ defaultTools: t });
+    const s = get();
     await savePrefs({
-      selectedModel: get().selectedModel,
-      systemPrompt: get().systemPrompt,
-      defaultTools: t,
-      defaultAutoTools: get().defaultAutoTools,
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,  
     });
   },
 
   setDefaultAutoTools: async (b) => {
     set({ defaultAutoTools: b });
+    const s = get();
     await savePrefs({
-      selectedModel: get().selectedModel,
-      systemPrompt: get().systemPrompt,
-      defaultTools: get().defaultTools,
-      defaultAutoTools: b,
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,
+    });
+  },
+
+  setThemeMode: async (m) => {
+    set({ themeMode: m });
+    const s = get();
+    await savePrefs({
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,
     });
   },
 

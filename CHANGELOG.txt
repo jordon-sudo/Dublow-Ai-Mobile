@@ -652,3 +652,59 @@ Notes
 - Fix 1 is one-directional (conversation → selector, on activeId change only). The effect intentionally does not depend on selectedModel to avoid fighting user selections mid-chat.
 - New conversations without a modelId inherit the current global selector value, matching prior behavior.
 
+v0.0.67 - Chat export + redesigned long-press menu in the conversations drawer
+
+Added
+- src/lib/chatExport.ts: conversation export helpers. buildMarkdown(conv) emits a titled markdown document with per-message sections. buildHtml(conv) emits a print-styled HTML document with a minimal markdown-to-HTML transform (fenced code, inline code, bold, italics, paragraphs) that intentionally avoids pulling in a full markdown parser. exportConversation(conv, 'markdown' | 'pdf') writes the file to cacheDirectory under a safe-base-name derived from the chat title, then hands it to the system share sheet via expo-sharing. PDF generation uses expo-print (printToFileAsync) and renames the resulting file to <title>.pdf so the share sheet default filename reflects the chat.
+- src/components/ChatActionSheet.tsx: purpose-built bottom-sheet menu for a conversation row. Actions: Pin/Unpin (label and icon flip on the pinned prop), Rename, Export as Markdown, Export as PDF, Delete (destructive, iOS system red #ff453a). Static "Chat options" header. Styled to match ConversationsDrawer's hex palette instead of the theme tokens used elsewhere — intentional visual consistency with the drawer's existing look.
+
+Changed
+- src/components/ConversationsDrawer.tsx: long-press on a conversation row now opens ChatActionSheet instead of Alert.alert. Replaced handleLongPress with openSheet + handleSheetAction; the latter inserts a 150ms delay after dismissing the sheet before mounting any follow-up modal (rename prompt, delete confirm, share sheet) so iOS does not drop the second modal mid-animation. Added sheetConv state (Conversation | null) so the sheet reads title/pinned from a stable snapshot.
+- src/components/ConversationsDrawer.tsx: each conversation row now renders an ellipsis-horizontal Ionicon on the right that opens the action sheet on tap. e.stopPropagation() prevents the row's onPress from firing alongside the icon tap. Long-press still opens the sheet for muscle-memory parity.
+- src/components/ConversationsDrawer.tsx: typed the rows useMemo with an explicit Row union ({ header } | { conv, snippet, hit }). Previously TypeScript inferred the memo's return as a union of the two branch return types, which caused FlatList<T> to resolve to the wrong branch's T and triggered TS2769 errors on both the FlatList data prop and the header text node. Also fixed the filter(Boolean) assertion with `as Conversation[]` so the downstream filter/map chain narrows correctly.
+- src/components/ConversationsDrawer.tsx: added rowMore style for the ellipsis tap target.
+
+Dependencies
+- Added expo-print (installed via `npx expo install expo-print`). Required for PDF export. iOS needs no rebuild; Android registers a print service and requires a dev client rebuild.
+- expo-sharing and expo-file-system/legacy already present; no install needed.
+
+Notes
+- Export filename sanitization: any non-word characters collapse to underscore, length capped at 60 chars, falls back to "chat" if the sanitized result is empty.
+- Markdown export skips system messages and empty-content messages. Role label mapping: user -> "You", assistant -> "Assistant", other roles pass through verbatim.
+- HTML export's markdown-to-HTML is purposely minimal. It handles ~all real chat content but is not a spec-compliant parser. If richer fidelity becomes needed (tables, ordered lists, images), swap in a proper parser rather than extending the regex pile.
+- ChatActionSheet is a sibling of AttachmentActionSheet rather than a shared abstraction. Actions, styles, and destructive handling diverge enough that deduplication would bloat both call sites for no real savings.
+- Alert.alert is still used for the Delete confirmation and the Rename prompt (iOS Alert.prompt). These can be migrated to custom modals in a follow-up if cross-platform parity is desired (Android currently falls back to a stub for rename).
+
+v0.1.0 - Model picker search, empty-chat landing UI, default model setting, and light/dark theme toggle
+
+Added
+- src/components/ChatEmptyState.tsx: landing component rendered when the active conversation has zero messages. Centers a greeting, a large tappable model tile showing the current model label, and two quick-action buttons (Choose Prompt, Image Generation). Purely presentational — all interaction is routed back through props (onPickModel, onChoosePrompt, onImageGeneration) so the parent owns state.
+- src/theme.ts: lightTheme palette. Warm off-white bg (#F7F7F8), white surface, #EDEDEF surfaceAlt for muted chips, #E3E3E6 borders, near-black text (#111113), #6B6B72 textMuted, Hatz purple (#7818D8) preserved as primary, #EDE3FA primarySoft for tinted selected states, #D92D20 danger. Passes WCAG AA on the primary color against white at 16pt+.
+- src/theme.ts: ThemeMode type ('dark' | 'light' | 'system') and resolveTheme(mode, system) helper. useTheme() now subscribes to settingsStore.themeMode via Zustand selector and, when mode === 'system', additionally subscribes to Appearance.addChangeListener so the UI tracks OS dark/light flips in real time.
+- src/store/settingsStore.ts: themeMode: ThemeMode field on Prefs and SettingsState, defaulting to 'dark'. Added setThemeMode(m) setter that persists the full Prefs snapshot via savePrefs. Exported ThemeMode type alongside the existing exports.
+- src/store/settingsStore.ts: defaultModelId: string | null field on Prefs and SettingsState, defaulting to null. Added setDefaultModelId(id) setter that persists the full Prefs snapshot.
+- app/settings.tsx: new "Appearance" section at the top of the settings scroll view with a three-way segmented control (Light / Dark / System). Segment items use sunny-outline, moon-outline, and phone-portrait-outline icons; active item tinted with theme.colors.primarySoft and primary text.
+- app/settings.tsx: new "Default Model" section above "Tool Defaults". Row displays the current default model label with id subtitle; tapping opens ModelPickerSheet in default-picker mode (includeAgents=false). "Clear default" button appears when a default is set.
+- app/settings.tsx: styles.segment and styles.segmentItem StyleSheet entries for the appearance segmented control.
+
+Changed
+- app/index.tsx: target picker (the inline Modal opened from the chat header's model row) now renders a search TextInput between the title and the model list. Filter pipeline maps each TargetGroup through a label/id/provider substring match (case-insensitive), then drops empty groups so no orphan provider headers render. Added targetPickerQuery state and a useEffect that clears the query whenever the sheet opens so each visit starts clean. ScrollView gained keyboardShouldPersistTaps="handled" so the first tap on a filtered row selects instead of dismissing the keyboard.
+- app/index.tsx: activeId sync useEffect now resolves the selector in priority order — (1) conv.modelId, (2) settings.defaultModelId, (3) leave the selector alone. This makes brand-new conversations snap to the configured default model. Once the user picks a different model in a chat, patchActive writes modelId and case (1) wins on subsequent visits. Effect intentionally depends only on activeId so mid-chat user picks are not overridden.
+- app/index.tsx: FlatList ListEmptyComponent swapped from <View /> to <ChatEmptyState /> with modelLabel resolved from currentTarget?.label, onPickModel bound to setTargetPickerOpen(true), onChoosePrompt navigating to /prompts, and onImageGeneration running the Gemini-image resolver.
+- app/index.tsx: FlatList contentContainerStyle now adds { flexGrow: 1 } conditionally when messages.length === 0, so the empty state fills the available viewport and centers properly. Normal list behavior is preserved once messages exist.
+- app/index.tsx: added handleChoosePrompt (pushes /prompts with selection haptic) and handleImageGeneration. handleImageGeneration resolves Gemini 3 Pro Image by exact slug "google/gemini-3-pro-image-preview" first, then by any id containing "gemini-3-pro-image", then by label/id containing both "gemini" and "image" or "nano banana". On miss, logs the available model ids to the console and shows an Alert with Cancel / Open picker actions.
+- app/index.tsx: composer paddingBottom reduced from Math.max(insets.bottom, spacing.md) + spacing.sm to insets.bottom to tighten the dock against the home indicator.
+- app/index.tsx: destructure includes defaultModelId from useSettings so the chat-switch effect can read it.
+- app/settings.tsx: useSettings destructure now pulls defaultModelId, setDefaultModelId, models, themeMode, setThemeMode.
+- app/settings.tsx: imports include ModelPickerSheet and ThemeMode.
+- src/components/ModelPickerSheet.tsx: added search TextInput above the grouped list with the same filter pipeline used by the inline picker (label/id/provider substring). Added searchWrap and searchInput styles. Reset query + selection whenever visible flips to true via a useMemo-keyed-on-visible effect.
+- src/store/settingsStore.ts: every savePrefs call across setSelectedModel, setDefaultModelId, setSystemPrompt, setDefaultTools, setDefaultAutoTools, and setThemeMode was rewritten to snapshot the full Prefs via `const s = get()` and pass every field. This prevents field loss when new Prefs keys are added — a bug that would have silently wiped defaultModelId or themeMode on the first unrelated setter call.
+
+Fixed
+- app/index.tsx: image generation button on the empty-state landing UI now resolves Gemini 3 Pro Image via a three-tier lookup instead of a single label substring match, preventing silent failures when the catalog returns a different label casing or slug prefix.
+
+Notes
+- Light palette derived from the existing dark palette: bg and surface inverted, Hatz primary preserved, primarySoft shifted from #3a1f5c (dark tinted purple) to #EDE3FA (light tinted purple). Components that bake hex values directly instead of reading theme.colors.* will not repaint — report any offenders for follow-up patches.
+- StatusBar was not wired to the theme because the codebase imports but does not render <StatusBar />. No-op.
+- handleImageGeneration persists the selected image model via useConversations.getState().patchActive({ modelId }) so switching away and back to the chat restores image mode.
+- Target picker search effect intentionally runs on targetPickerOpen becoming true, not on close, to avoid a flash of stale query during the modal's close animation.
