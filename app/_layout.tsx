@@ -13,6 +13,7 @@ import {
   installNotificationTapHandler,
 } from '../src/lib/notifications';
 import { startJobPoller } from '../src/lib/jobPoller';
+import { useUsage } from '../src/store/usageStore';
 
 LogBox.ignoreLogs([
   'A props object containing a "key" prop is being spread into JSX',
@@ -41,6 +42,21 @@ export default function RootLayout() {
       unsubNotifTap();
     };
   }, [hydrateSettings, hydrateChat]);
+
+  // Usage polling — starts only after the user is authenticated, since the
+  // endpoint needs a valid API key. Stops on sign-out to avoid 401 spam.
+  useEffect(() => {
+    if (!hydrated) return;
+    const authed = !!apiKey && !!userHashId;
+    if (!authed) {
+      useUsage.getState().stopPolling();
+      return;
+    }
+    useUsage.getState().startPolling();
+    return () => {
+      useUsage.getState().stopPolling();
+    };
+  }, [hydrated, apiKey, userHashId]);
 
   // Gate: route to /signin when auth is incomplete, and away from /signin when complete.
   useEffect(() => {

@@ -708,3 +708,26 @@ Notes
 - StatusBar was not wired to the theme because the codebase imports but does not render <StatusBar />. No-op.
 - handleImageGeneration persists the selected image model via useConversations.getState().patchActive({ modelId }) so switching away and back to the chat restores image mode.
 - Target picker search effect intentionally runs on targetPickerOpen becoming true, not on close, to avoid a flash of stale query during the modal's close animation.
+
+v0.38.0 - Credit usage awareness: polling, banner, and settings meter
+
+Added
+- src/lib/hatzClient.ts: getUsageLimit() method. GETs /v1/usage/limit, returns { totalLimit, totalUsed } on 2xx, returns null on 401/403 so callers can treat an inaccessible endpoint as "feature unavailable" rather than a hard error. Throws on other non-OK statuses. Normalizes both snake_case (total_credit_limit, total_credits_used) and camelCase keys from the response.
+- src/store/usageStore.ts: new Zustand store tracking { totalLimit, totalUsed, loadedAt, available, hasData, dismissedKind }. refresh() calls getUsageLimit() and, on a 401/403 sentinel, flips available=false to silently disable the feature. startPolling() runs an immediate refresh, schedules a 5-minute interval gated on AppState.currentState === 'active', and subscribes to AppState change events to refresh on foreground. stopPolling() tears down both. notifyWorkflowLimited() triggers an immediate refresh when a 429 is observed from /workflows/run.
+- src/store/usageStore.ts: deriveKind(used, limit) returns 'none' | 'warn' | 'cap' with thresholds at 80% and 95%. selectVisibleKind(state) returns the kind the UI should render, accounting for availability, data presence, and per-session dismissal. percentUsed(state) returns a normalized 0..1+ ratio. Dismissal is severity-aware: when actual severity escalates (warn -> cap), the dismissedKind is reset so escalations are never silent.
+- src/components/UsageBanner.tsx: banner component that renders amber for 'warn' (#FEF3C7 bg, #F59E0B border, #78350F text, warning icon) and red for 'cap' (#FEE4E2 bg, #F97066 border, #7A271A text, alert-circle icon). Body copy differs per kind; cap explicitly mentions routing to lower-cost models. Optional swipeToDismiss prop (default false) wires an Animated.View + PanResponder that dismisses on horizontal pan past 110px with an exit translate + opacity fade, and springs back otherwise. Close button always present regardless of swipe setting.
+- src/components/UsageMeter.tsx: always-visible credit meter for settings. Renders a header row (label + percentage), an 8px pill-shaped progress track colored by threshold (emerald-500 under 80%, amber-500 at 80–94%, red-600 at 95%+), and a subtitle in the form "X of Y credits used" via formatCredits() (which collapses values >=1000 to "1.2k" style). Silently hides when the usage endpoint is unavailable or before first successful load.
+- app/_layout.tsx: second useEffect that starts and stops usage polling based on authentication. Gates on hydrated && !!apiKey && !!userHashId so polling never fires with a missing key (which would spam 401s and permanently flip available=false). Cleanup stops polling on sign-out or unmount.
+- app/index.tsx: <UsageBanner swipeToDismiss /> mounted directly below the chat header, above the offline banner block. Provides an at-a-glance warning in the place users spend the most time.
+- app/settings.tsx: new "Usage" section rendered at the top of the settings scroll view, above "Appearance". Contains <UsageBanner /> (no swipe) stacked above <UsageMeter /> so the detailed meter is visible even when the banner is dismissed or below warn threshold.
+
+Changed
+- app/_layout.tsx: usage-polling useEffect dependency array corrected from [hydrateSettings, hydrateChat] (stable refs that never trigger re-run) to [hydrated, apiKey, userHashId] so the effect actually fires when auth state becomes available. Without this correction the effect ran exactly once on mount with hydrated=false and never again, leaving polling permanently off.
+- src/lib/hatzClient.ts: runWorkflow() now inspects res.status before throwing. On 429 it lazy-requires ../store/usageStore and calls useUsage.getState().notifyWorkflowLimited() inside a try/catch so the banner updates within seconds of hitting the soft cap instead of waiting for the 5-minute poll tick. Lazy require sidesteps a circular import between hatzClient and settingsStore/usageStore; try/catch ensures a future cycle bug cannot break workflow execution.
+
+Notes
+- The store intentionally distinguishes "endpoint returned 401/403" (sets available=false, feature disabled for this key) from "transient network/5xx error" (keeps prior state, logs a warning). Only the former should silence the banner permanently; the latter should retry on the next tick.
+- Dismissals are held in memory only. App restart resets dismissedKind to 'none', which is the desired behavior — a new session should re-surface any active warning.
+- Banner was initially mounted globally in _layout.tsx but overlapped the status bar safe area on chat. The final design mounts per-screen with appropriate context (swipe on chat, persistent in settings).
+- Threshold constants (0.8, 0.95) live in deriveKind(). Change in one place if product wants to tune.
+

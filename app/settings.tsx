@@ -12,6 +12,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { useSettings, ThemeMode } from '../src/store/settingsStore';
 import ModelPickerSheet from '../src/components/ModelPickerSheet';
+import UsageBanner from '../src/components/UsageBanner';
+import UsageMeter from '../src/components/UsageMeter';
 import { usePrompts } from '../src/store/promptsStore';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { groupedTools, ToolDef } from '../src/lib/tools';
@@ -167,6 +169,11 @@ export default function SettingsScreen() {
         }}
       />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
+
+        <Section title="Usage" theme={theme}>
+          <UsageBanner />
+          <UsageMeter />
+        </Section>
 
         <Section
           title="Appearance"

@@ -240,6 +240,16 @@ async getWorkflowRaw(appId: string): Promise<AppItem> {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      // Soft-cap signal: Hatz returns 429 with a "credit overage" detail on
+      // /workflows/run. Ping the usage store so the banner updates without
+      // waiting for the next 5-minute poll. Lazy-imported to avoid a circular
+      // dependency between client and store.
+      if (res.status === 429) {
+        try {
+          const { useUsage } = require('../store/usageStore');
+          useUsage.getState().notifyWorkflowLimited();
+        } catch { /* best-effort */ }
+      }
       throw new Error(`runWorkflow ${res.status}: ${text.slice(0, 200)}`);
     }
     return (await res.json()) as RunWorkflowResponse;
@@ -325,6 +335,29 @@ async uploadFile(
   }
   throw new Error('uploadFile: could not locate file UUID in response. See console logs.');
 }
+// ---------- Usage ----------
+/**
+ * Fetch the organization's credit usage snapshot. Returns null on 401/403
+ * so callers can treat an inaccessible endpoint as "feature unavailable"
+ * rather than a hard error. All other non-OK statuses throw.
+ */
+async getUsageLimit(): Promise<{ totalLimit: number; totalUsed: number } | null> {
+  const res = await fetch(`${BASE_URL}/usage/limit`, { headers: this.headers() });
+  if (res.status === 401 || res.status === 403) return null;
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`getUsageLimit ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  // Shape per Hatz docs: { total_credit_limit, total_credits_used }.
+  const limit = Number(data?.total_credit_limit ?? data?.totalCreditLimit ?? 0);
+  const used = Number(data?.total_credits_used ?? data?.totalCreditsUsed ?? 0);
+  if (!Number.isFinite(limit) || !Number.isFinite(used)) {
+    throw new Error('getUsageLimit: malformed response');
+  }
+  return { totalLimit: limit, totalUsed: used };
+}
+
 // ---------- Connection test ----------
 async testConnection(): Promise<void> {
   const res = await fetch(`${BASE_URL}/chat/models`, {

@@ -27,6 +27,7 @@ import MessageActionSheet, { MessageAction } from '../src/components/MessageActi
 import ModelPickerSheet from '../src/components/ModelPickerSheet';
 import ChatEmptyState from '../src/components/ChatEmptyState';
 import { copyText, shareText, buildQuoteMarkdown, deriveTitleFromMessage } from '../src/lib/messageActions';
+import UsageBanner from '../src/components/UsageBanner';
 
 const ACCEPTED_EXTENSIONS = [
   'pdf', 'doc', 'docx', 'txt', 'md', 'rtf',
@@ -601,6 +602,8 @@ export default function ChatScreen() {
           </Pressable>
         </Link>
       </View>
+
+      <UsageBanner swipeToDismiss />
 
       {!isOnline && isInitialized ? (
         <View style={[stylesOffline.banner, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
