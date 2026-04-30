@@ -18,6 +18,7 @@ interface Prefs {
   defaultTools: string[];
   defaultAutoTools: boolean;
   themeMode: ThemeMode;
+  analyticsEnabled: boolean;
 }
 
 const DEFAULT_PREFS: Prefs = {
@@ -27,6 +28,7 @@ const DEFAULT_PREFS: Prefs = {
   defaultTools: [],
   defaultAutoTools: true,
   themeMode: 'dark',
+  analyticsEnabled: true,
 };
 
 export interface PickTarget extends ModelInfo {}
@@ -51,6 +53,7 @@ interface SettingsState {
   defaultTools: string[];
   defaultAutoTools: boolean;
   themeMode: ThemeMode;
+  analyticsEnabled: boolean;
 
   hydrate: () => Promise<void>;
   setApiKey: (key: string | null) => Promise<void>;
@@ -60,6 +63,7 @@ interface SettingsState {
   setDefaultModelId: (id: string | null) => Promise<void>;
   setSystemPrompt: (s: string) => Promise<void>;
   setThemeMode: (m: ThemeMode) => Promise<void>;
+  setAnalyticsEnabled: (b: boolean) => Promise<void>;
   setDefaultTools: (t: string[]) => Promise<void>;
   setDefaultAutoTools: (b: boolean) => Promise<void>;
   refreshCatalog: () => Promise<void>;
@@ -91,6 +95,12 @@ export const useSettings = create<SettingsState>((set, get) => ({
       ]);
       const prefs: Prefs = prefsRaw ? { ...DEFAULT_PREFS, ...JSON.parse(prefsRaw) } : DEFAULT_PREFS;
       set({ apiKey: key, userEmail: email, userHashId: hashId, ...prefs, hydrated: true });
+      // Sync telemetry opt-out with stored preference, and identify if signed in.
+      try {
+        const { setAnalyticsEnabled, identify } = await import('../lib/telemetry');
+        setAnalyticsEnabled(prefs.analyticsEnabled);
+        identify(hashId ?? null);
+      } catch { /* telemetry not yet initialized — _layout will handle */ }
       if (key) await get().refreshCatalog();
     } catch (e) {
       console.warn('settings hydrate failed', e);
@@ -113,6 +123,11 @@ export const useSettings = create<SettingsState>((set, get) => ({
       SecureStore.setItemAsync(USER_HASH_ID_SLOT, userHashId),
     ]);
     set({ apiKey, userEmail, userHashId });
+    try {
+      const { identify, track } = await import('../lib/telemetry');
+      identify(userHashId);
+      track('sign_in');
+    } catch { /* ignore */ }
     await get().refreshCatalog();
   },
 
@@ -122,6 +137,10 @@ export const useSettings = create<SettingsState>((set, get) => ({
       SecureStore.deleteItemAsync(USER_EMAIL_SLOT),
       SecureStore.deleteItemAsync(USER_HASH_ID_SLOT),
     ]);
+    try {
+      const { identify } = await import('../lib/telemetry');
+      identify(null);
+    } catch { /* ignore */ }
     set({
       apiKey: null,
       userEmail: null,
@@ -146,7 +165,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
       systemPrompt: s.systemPrompt,
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
-      themeMode: s.themeMode,   
+      themeMode: s.themeMode, 
+      analyticsEnabled: s.analyticsEnabled,  
     });
   },
 
@@ -159,7 +179,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
       systemPrompt: s.systemPrompt,
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
-      themeMode: s.themeMode,   
+      themeMode: s.themeMode, 
+      analyticsEnabled: s.analyticsEnabled,  
     });
   },
 
@@ -173,6 +194,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
       themeMode: s.themeMode,  
+      analyticsEnabled: s.analyticsEnabled,
     });
   },
 
@@ -186,6 +208,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
       themeMode: s.themeMode,  
+      analyticsEnabled: s.analyticsEnabled,
     });
   },
 
@@ -199,6 +222,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
       themeMode: s.themeMode,
+      analyticsEnabled: s.analyticsEnabled,
     });
   },
 
@@ -212,6 +236,26 @@ export const useSettings = create<SettingsState>((set, get) => ({
       defaultTools: s.defaultTools,
       defaultAutoTools: s.defaultAutoTools,
       themeMode: s.themeMode,
+      analyticsEnabled: s.analyticsEnabled,
+    });
+  },
+
+  setAnalyticsEnabled: async (b) => {
+    set({ analyticsEnabled: b });
+    // Flip the SDK immediately; the store is the source of truth.
+    try {
+      const { setAnalyticsEnabled } = await import('../lib/telemetry');
+      setAnalyticsEnabled(b);
+    } catch { /* ignore */ }
+    const s = get();
+    await savePrefs({
+      selectedModel: s.selectedModel,
+      defaultModelId: s.defaultModelId,
+      systemPrompt: s.systemPrompt,
+      defaultTools: s.defaultTools,
+      defaultAutoTools: s.defaultAutoTools,
+      themeMode: s.themeMode,
+      analyticsEnabled: s.analyticsEnabled,
     });
   },
 

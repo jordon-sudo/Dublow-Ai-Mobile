@@ -59,11 +59,9 @@ export const useUsage = create<UsageState>((set, get) => ({
   refresh: async () => {
     const getClient = useSettings.getState().getClient;
     const client = getClient();
-    console.log('[usageStore] refresh, client=', !!client);
     if (!client) return;
     try {
       const snap = await client.getUsageLimit();
-      console.log('[usageStore] snap=', snap);
       console.log('[usageStore] snap=', snap);
       if (snap === null) {
         console.warn('[usageStore] endpoint returned 401/403 — disabling banner');
@@ -130,8 +128,8 @@ export function percentUsed(s: UsageState): number | null {
 export function deriveKind(used: number | null, limit: number | null): BannerKind {
   if (used == null || limit == null || limit <= 0) return 'none';
   const pct = used / limit;
-  if (pct >= 0.0001) return 'cap';   // any usage at all triggers red
-  if (pct >= 0 ) return 'warn';
+  if (pct >= 0.95) return 'cap';
+  if (pct >= 0.8) return 'warn';
   return 'none';
 }
 

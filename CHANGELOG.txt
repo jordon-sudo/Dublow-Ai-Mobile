@@ -731,3 +731,30 @@ Notes
 - Banner was initially mounted globally in _layout.tsx but overlapped the status bar safe area on chat. The final design mounts per-screen with appropriate context (swipe on chat, persistent in settings).
 - Threshold constants (0.8, 0.95) live in deriveKind(). Change in one place if product wants to tune.
 
+v0.39.0 - Telemetry foundation: Sentry crash reporting and PostHog analytics
+
+Added
+- src/lib/telemetry.ts: unified telemetry wrapper. Exports initTelemetry(), identify(userHashId), track(event, props), captureError(err, context), setAnalyticsEnabled(on). All call sites import from here only — never from @sentry/react-native or posthog-react-native directly. sanitize() strips anything that isn't a primitive and truncates strings to 64 chars so accidental PII or content leakage fails closed. track() adds a Sentry breadcrumb in addition to the PostHog capture so crashes carry event context. Policy: no message content, no file contents, no free-form user text, no email — only userHashId as identifier.
+- app/privacy.tsx: new Privacy settings screen. Usage analytics Switch wired to setAnalyticsEnabled, paired with "What we collect" and "What we never collect" panels and an explicit note that crash reporting is always enabled. Accessible via Settings > Account > Privacy.
+- app/settings.tsx: Privacy row added inside the Account section with shield-checkmark icon, routes to /privacy.
+- src/store/settingsStore.ts: analyticsEnabled boolean added to Prefs (default true) and SettingsState. setAnalyticsEnabled setter flips the store, dynamically imports telemetry to sync the SDK opt-in/out, then persists via savePrefs. All existing savePrefs call sites updated to include the new field.
+- src/store/settingsStore.ts: hydrate() lazily imports telemetry to sync analyticsEnabled with the stored preference and identify() the hashed user on boot. setAuth() calls identify() and track('sign_in') after persistence. signOut() calls identify(null) to clear the SDK user on sign-out.
+- app/_layout.tsx: initTelemetry() invoked at module load before any React renders. track('app_open') fired inside the mount useEffect.
+- app.json: extra.posthogApiKey and extra.posthogHost published for client-side PostHog init. Sentry DSN lives in the wizard-generated Sentry.init in app/_layout.tsx.
+- @sentry/react-native/expo plugin entry added to app.json under plugins with organization "dublow-digital" and project "react-native".
+
+Changed
+- src/lib/telemetry.ts: Sentry.init() intentionally not performed here so the @sentry/react-native/expo wizard's init in app/_layout.tsx is the single source of truth. telemetry retains Sentry.setUser, Sentry.addBreadcrumb, and Sentry.captureException usage.
+- src/lib/telemetry.ts: sanitize() return type narrowed to Record<string, string | number | boolean> to satisfy PostHog's PostHogEventProperties (JsonType) signature.
+
+Dependencies
+- @sentry/react-native: installed via wizard, initialized in app/_layout.tsx with session replay (0.1 session / 1.0 error sample rate), mobileReplayIntegration, feedbackIntegration, sendDefaultPii per wizard defaults.
+- posthog-react-native: installed and initialized in src/lib/telemetry.ts with captureAppLifecycleEvents: false (only named events are sent) and disabled: __DEV__ (dev traffic excluded from analytics).
+
+Notes
+- Two Sentry projects were created in the dublow-digital org during setup (one by early scaffolding, one by the wizard). The wizard project is authoritative. Archive the earlier one to avoid split error streams.
+- PostHog region is US (https://us.i.posthog.com).
+- Analytics is opt-out, default on. Toggle at Settings > Privacy. Crash reporting is always on and cannot be disabled.
+- Sentry auth token for source map uploads belongs in a local .env (SENTRY_AUTH_TOKEN). .env is gitignored.
+- Event instrumentation at call sites (chat_message_sent, chat_message_received, model_changed, prompt_used, file_uploaded, app_run, workflow_run, error_shown) is not yet wired. Only app_open and sign_in fire today. The wrapper and privacy surface are in place so the remaining wiring is additive.
+

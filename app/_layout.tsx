@@ -14,12 +14,36 @@ import {
 } from '../src/lib/notifications';
 import { startJobPoller } from '../src/lib/jobPoller';
 import { useUsage } from '../src/store/usageStore';
+import { initTelemetry, track } from '../src/lib/telemetry';
+
+// Initialize telemetry once at module load (before any React renders).
+initTelemetry();
+import * as Sentry from '@sentry/react-native';
+
+Sentry.init({
+  dsn: 'https://9f28b1c9f6c4aa969abe2702680be75f@o4511309479673856.ingest.us.sentry.io/4511309492977664',
+
+  // Adds more context data to events (IP address, cookies, user, etc.)
+  // For more information, visit: https://docs.sentry.io/platforms/react-native/data-management/data-collected/
+  sendDefaultPii: true,
+
+  // Enable Logs
+  enableLogs: true,
+
+  // Configure Session Replay
+  replaysSessionSampleRate: 0.1,
+  replaysOnErrorSampleRate: 1,
+  integrations: [Sentry.mobileReplayIntegration(), Sentry.feedbackIntegration()],
+
+  // uncomment the line below to enable Spotlight (https://spotlightjs.com)
+  // spotlight: __DEV__,
+});
 
 LogBox.ignoreLogs([
   'A props object containing a "key" prop is being spread into JSX',
 ]);
 
-export default function RootLayout() {
+export default Sentry.wrap(function RootLayout() {
   const hydrateSettings = useSettings((s) => s.hydrate);
   const hydrateChat = useChat((s) => s.hydrate);
   const hydrated = useSettings((s) => s.hydrated);
@@ -37,6 +61,7 @@ export default function RootLayout() {
     void ensureNotificationPermission();
     const unsubNotifTap = installNotificationTapHandler();
     startJobPoller();
+    track('app_open');
 
     return () => {
       unsubNotifTap();
@@ -101,4 +126,4 @@ export default function RootLayout() {
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
-}
+});

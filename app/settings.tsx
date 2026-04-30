@@ -240,6 +240,22 @@ export default function SettingsScreen() {
             </View>
             <Ionicons name="chevron-forward" size={18} color={theme.colors.textMuted} />
           </Pressable>
+
+          <Pressable
+            onPress={() => router.push('/privacy')}
+            style={[styles.row, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border, marginTop: spacing.sm }]}
+          >
+            <Ionicons name="shield-checkmark-outline" size={18} color={theme.colors.textMuted} />
+            <View style={{ flex: 1 }}>
+              <Text style={{ color: theme.colors.text, fontSize: fontSize.md, fontWeight: '600' }}>
+                Privacy
+              </Text>
+              <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs, marginTop: 2 }} numberOfLines={1}>
+                Analytics preferences and data collection
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={theme.colors.textMuted} />
+          </Pressable>
         </Section>
 
         <Section title="System Prompt" theme={theme}

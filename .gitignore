@@ -39,3 +39,11 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+.env.local
+
+# Sentry
+.env
+sentry.properties
+ios/sentry.properties
+android/sentry.properties

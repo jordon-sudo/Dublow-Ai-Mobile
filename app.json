@@ -2,7 +2,7 @@
   "expo": {
     "name": "Dublow-AI-Mobile",
     "slug": "hatz-chat",
-    "version": "0.38.0",
+    "version": "0.39.0",
     "scheme": "haztchat",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
@@ -21,12 +21,12 @@
       "package": "com.dublowdigital.hatzchat",
       "backgroundColor": "#000000"
     },
-     "plugins": [
+    "plugins": [
       ["expo-media-library", {
-  "photosPermission": "Allow Hatz Chat to save generated images to your photo library.",
-  "savePhotosPermission": "Allow Hatz Chat to save generated images to your photo library.",
-  "isAccessMediaLocationEnabled": true
-}],
+        "photosPermission": "Allow Hatz Chat to save generated images to your photo library.",
+        "savePhotosPermission": "Allow Hatz Chat to save generated images to your photo library.",
+        "isAccessMediaLocationEnabled": true
+      }],
       "expo-router",
       "expo-secure-store",
       [
@@ -35,9 +35,19 @@
           "photosPermission": "Allow Hatz Chat to attach photos to your messages.",
           "cameraPermission": "Allow Hatz Chat to take photos for your messages."
         }
+      ],
+      [
+        "@sentry/react-native/expo",
+        {
+          "organization": "dublow-digital",
+          "project": "react-native"
+        }
       ]
     ],
-    "experiments": { "typedRoutes": true }
-  
+    "experiments": { "typedRoutes": true },
+    "extra": {
+      "posthogApiKey": "phc_q3Ce7pNZgtK2M7LkdwUaCzSd7A4eCCGfyQWGyvxrwhA7",
+      "posthogHost": "https://us.i.posthog.com"
+    }
   }
 }
