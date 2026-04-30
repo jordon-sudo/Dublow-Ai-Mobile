@@ -14,7 +14,10 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { useConversations, Conversation } from '../store/conversationsStore';
+import ChatActionSheet, { type ChatAction } from './ChatActionSheet';
+import { exportConversation } from '../lib/chatExport';
 
 type Props = {
   visible: boolean;
@@ -39,6 +42,7 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
 
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
+  const [sheetConv, setSheetConv] = useState<Conversation | null>(null);
   const slide = useRef(new Animated.Value(-DRAWER_W)).current;
   const fade = useRef(new Animated.Value(0)).current;
 
@@ -64,23 +68,27 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
     return () => clearTimeout(t);
   }, [query]);
 
-  const rows = useMemo(() => {
+  type Row =
+    | { header: 'Pinned' | 'Recent' }
+    | { conv: Conversation; snippet: string; hit: 'title' | 'message' | 'none' };
+
+  const rows = useMemo<Row[]>(() => {
     if (debounced) {
-      return search(debounced).map((r) => ({
+      return search(debounced).map<Row>((r) => ({
         conv: r.conv,
         snippet: r.snippet,
         hit: r.hit,
       }));
     }
-    const list = order.map((id) => conversations[id]).filter(Boolean);
+    const list = order.map((id) => conversations[id]).filter(Boolean) as Conversation[];
     const pinned = list.filter((c) => c.pinned);
     const recent = list.filter((c) => !c.pinned);
-    return [
-      ...(pinned.length ? [{ header: 'Pinned' as const }] : []),
-      ...pinned.map((conv) => ({ conv, snippet: lastPreview(conv), hit: 'none' as const })),
-      ...(recent.length ? [{ header: 'Recent' as const }] : []),
-      ...recent.map((conv) => ({ conv, snippet: lastPreview(conv), hit: 'none' as const })),
-    ];
+    const out: Row[] = [];
+    if (pinned.length) out.push({ header: 'Pinned' });
+    for (const conv of pinned) out.push({ conv, snippet: lastPreview(conv), hit: 'none' });
+    if (recent.length) out.push({ header: 'Recent' });
+    for (const conv of recent) out.push({ conv, snippet: lastPreview(conv), hit: 'none' });
+    return out;
   }, [debounced, order, conversations, search]);
 
   const handleNew = () => {
@@ -93,31 +101,48 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
     onClose();
   };
 
-  const handleLongPress = (conv: Conversation) => {
-    Alert.alert(conv.title || 'Untitled', undefined, [
-      {
-        text: conv.pinned ? 'Unpin' : 'Pin to top',
-        onPress: () => togglePin(conv.id),
-      },
-      {
-        text: 'Rename',
-        onPress: () => promptRename(conv, renameConversation),
-      },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () =>
-          Alert.alert('Delete conversation?', 'This cannot be undone.', [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Delete',
-              style: 'destructive',
-              onPress: () => deleteConversation(conv.id),
-            },
-          ]),
-      },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+  const openSheet = (conv: Conversation) => setSheetConv(conv);
+
+  const handleSheetAction = async (action: ChatAction) => {
+    const conv = sheetConv;
+    setSheetConv(null);
+    if (!conv) return;
+    // Let the sheet's dismiss animation finish before any follow-up modal
+    // (rename prompt, delete confirm, share sheet) appears.
+    await new Promise((r) => setTimeout(r, 150));
+
+    switch (action) {
+      case 'togglePin':
+        await togglePin(conv.id);
+        return;
+      case 'rename':
+        promptRename(conv, renameConversation);
+        return;
+      case 'exportMarkdown':
+        try {
+          await exportConversation(conv, 'markdown');
+        } catch (e: any) {
+          Alert.alert('Export failed', e?.message ?? 'Unknown error.');
+        }
+        return;
+      case 'exportPdf':
+        try {
+          await exportConversation(conv, 'pdf');
+        } catch (e: any) {
+          Alert.alert('Export failed', e?.message ?? 'Unknown error.');
+        }
+        return;
+      case 'delete':
+        Alert.alert('Delete conversation?', 'This cannot be undone.', [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: () => deleteConversation(conv.id),
+          },
+        ]);
+        return;
+    }
   };
 
   return (
@@ -168,7 +193,7 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
               return (
                 <Pressable
                   onPress={() => handleSelect(conv.id)}
-                  onLongPress={() => handleLongPress(conv)}
+                  onLongPress={() => openSheet(conv)}
                   style={({ pressed }) => [
                     styles.row,
                     isActive && styles.rowActive,
@@ -184,6 +209,16 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
                       {conv.title || 'New chat'}
                     </Text>
                     <Text style={styles.rowTime}>{relTime(conv.updatedAt)}</Text>
+                    <Pressable
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        openSheet(conv);
+                      }}
+                      hitSlop={10}
+                      style={styles.rowMore}
+                    >
+                      <Ionicons name="ellipsis-horizontal" size={18} color="#8a8a8e" />
+                    </Pressable>
                   </View>
                   {!!snippet && (
                     <Text numberOfLines={1} style={styles.rowPreview}>
@@ -201,6 +236,13 @@ export default function ConversationsDrawer({ visible, onClose }: Props) {
           />
         </KeyboardAvoidingView>
       </Animated.View>
+
+      <ChatActionSheet
+        visible={!!sheetConv}
+        pinned={!!sheetConv?.pinned}
+        onSelect={handleSheetAction}
+        onClose={() => setSheetConv(null)}
+      />
     </Modal>
   );
 }
@@ -334,6 +376,11 @@ const styles = StyleSheet.create({
   rowTime: {
     color: '#8a8a8e',
     fontSize: 12,
+  },
+  rowMore: {
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    marginLeft: 4,
   },
   rowPreview: {
     color: '#8a8a8e',

@@ -605,3 +605,50 @@ Changed
 Notes
 - JS-only change. No native rebuild required.
 - When a light theme mode is added, the same deep-strip logic will apply to atomOneLight automatically; only the HLJS_STYLE_BY_MODE map and Theme['mode'] union need to be updated.
+
+v0.0.65 - Assistant-generated attachment previews, save-to-device, and chat image support
+
+Added
+- src/lib/attachments.ts: shared helpers for attachment handling. isImageUrl, isVideoUrl, filenameFromUrl, downloadToCache, saveToPhotos, shareLocalFile, copyLink. downloadToCache probes Content-Type via HEAD and appends a MIME-mapped extension when the URL path has none (S3 presigned URLs without extensions previously caused MediaLibrary.saveToLibraryAsync to reject with "could not get the file's extension").
+- src/components/AttachmentActionSheet.tsx: bottom-sheet action menu for attachments. Shows Save to Photos (images only), Save to Files, Share, Copy Link. Purpose-built; does not extend MessageActionSheet.
+- src/components/ImagePreviewModal.tsx: fullscreen image preview. Top-bar action row with Save to Photos (gated by canSaveToPhotos prop), Save to Files, and Close, rendered as translucent icon+label pills. Loading spinner during image fetch, silent-fail error state, backdrop tap dismisses.
+- src/components/JobAttachment.tsx: attachment tile for workflow step outputs. Fetches the presigned URL on mount (so effectively on expand), detects images by output_type hint plus URL-extension fallback, renders inline thumbnail for images or a document tile for other file types. Tap opens the image preview or system share sheet (non-images); long-press opens AttachmentActionSheet.
+- src/components/MarkdownImage.tsx: inline markdown image renderer used by AssistantMarkdown for ![alt](url) nodes. Same tap/long-press behavior as JobAttachment but with a pre-known URL (no presigned fetch). Silently drops broken images to avoid permanent error tiles mid-stream.
+
+Changed
+- src/components/AssistantMarkdown.tsx: added an image render rule that routes markdown image nodes through MarkdownImage, giving chat messages, job text outputs, and any future AssistantMarkdown surface the same preview + save-to-device behavior.
+- app/jobs/[jobId].tsx: StepCard no longer renders the legacy "Open file" Pressable for file outputs. It now mounts JobAttachment when step.status === 'complete', with a "Attachment will appear here when the step completes." placeholder otherwise. Removed the openFile function, fetchingUrl state, and Linking/Alert imports from the file. Added JobAttachment import.
+
+Dependencies
+- Added expo-media-library (required for saveToLibraryAsync on iOS Photos and Android MediaStore). Requires a dev client rebuild because it registers native permissions via the existing app.json plugin entry.
+- expo-file-system, expo-sharing, expo-clipboard, expo-haptics already present; no install needed.
+
+Notes
+- Save to Files is implemented via expo-sharing's shareAsync, which surfaces "Save to Files" in the iOS share sheet and the SAF destination picker on Android.
+- Image detection uses output_type === 'image' as the primary signal, with a URL-extension fallback for .png .jpg .jpeg .gif .webp .heic .heif .bmp.
+- Action-sheet to system-UI transitions insert a 150ms delay so the bottom sheet finishes its dismiss animation before a subsequent permission prompt or share sheet mounts (prevents iOS dropping the second modal).
+- downloadToCache falls back to .jpg when HEAD does not return a Content-Type, which is correct for current image-only callers; non-image preview paths should pass an explicit extension when added.
+- Styles.actionBtn and styles.actionText in app/jobs/[jobId].tsx are now unused; left in place intentionally. Safe to remove in a follow-up pass.
+
+v0.0.66 - Model selector follows active chat; job poller no longer loops on terminal jobs
+
+Fixed
+- app/index.tsx: the global model selector now mirrors the active conversation's last-used model on chat switch. Previously the selector carried over from the prior chat, so opening a different conversation did not reflect the model it was last used with. Added a useEffect keyed to activeId that reads the active conversation via useConversations.getState() and calls setSelectedModel when the conversation has a modelId that differs from the current selection. Reads a snapshot imperatively instead of subscribing so streaming token updates do not re-trigger the sync.
+- app/index.tsx: the target model picker (the per-send model picker) now writes the selected model back to the active conversation via useConversations.getState().patchActive({ modelId }). This makes per-chat model memory work end-to-end: pick a model, switch away, come back, the selector restores it. The regenerate path already persisted modelId; this aligns the primary picker with that behavior.
+- src/lib/jobPoller.ts: terminal jobs with notified=false no longer trigger indefinite server polling. The previous getPendingJobs filter combined "needs poll" and "needs notify" into one predicate (!isTerminalStatus(status) || notified !== true), which meant any job that reached a terminal state without successfully persisting notified=true (e.g. app backgrounded at the moment of completion, or notification throw) was polled against getJobStatus on every tick forever. Split into two queues:
+  - getPollableJobs: non-terminal workflow jobs only. Polled against the API.
+  - getUnnotifiedTerminalJobs: terminal jobs with notified=false. Handled locally with zero network cost via a new sweepUnnotifiedTerminal() that fires one best-effort notification and marks notified unconditionally (even if the notify call throws) so the zombie cannot re-arm.
+- src/lib/jobPoller.ts: added an is_workflow guard to the pollable set so client-side app pseudo-jobs are never sent to getJobStatus. Belt-and-suspenders against 404 loops for app jobs that were never workflows to begin with.
+- src/lib/jobPoller.ts: markNotified is now called in the main tick's terminal-transition branch regardless of whether notifyJobComplete threw. Previously a thrown notification silently prevented the mark step, which re-armed the zombie on the next tick.
+
+Changed
+- src/lib/jobPoller.ts: startJobPoller now awaits hydrate() and immediately runs sweepUnnotifiedTerminal() on boot so pre-existing zombie jobs from prior sessions are cleared within milliseconds of app launch rather than on the first 5-second tick.
+- src/lib/jobPoller.ts: sweep also runs at the top of every tick so terminal-but-unnotified jobs created mid-session cannot leak past a single tick boundary.
+- src/lib/jobPoller.ts: stale-job notification suppression — jobs whose updated_at is older than 10 minutes do not fire a retroactive local notification on sweep. They are still marked notified so they exit the queue. Prevents a push for jobs that completed days ago on first launch after the fix.
+
+Notes
+- JS-only changes. No native rebuild required.
+- Currently-looping zombie from prior sessions will be absorbed silently on next app launch due to the 10-minute staleness threshold.
+- Fix 1 is one-directional (conversation → selector, on activeId change only). The effect intentionally does not depend on selectedModel to avoid fighting user selections mid-chat.
+- New conversations without a modelId inherit the current global selector value, matching prior behavior.
+

@@ -119,6 +119,22 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // When the user switches conversations, mirror the conversation's last-used
+  // model into the global selector. New conversations have no modelId set, so
+  // they simply inherit whatever the selector is already showing — no reset.
+  useEffect(() => {
+    if (!activeId) return;
+    const conv = useConversations.getState().getActive();
+    const convModel = conv?.modelId;
+    if (convModel && convModel !== selectedModel) {
+      // Fire-and-forget; setSelectedModel persists prefs, we don't need to await.
+      void setSelectedModel(convModel);
+    }
+    // Intentionally depend only on activeId. We do not want this to re-run
+    // when selectedModel changes (that would fight user selections mid-chat).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
   /**
    * Stream a completion against the active conversation using the given modelId.
    * Extracted so both the regular send path AND the Regenerate action can share
@@ -731,7 +747,13 @@ export default function ChatScreen() {
                     return (
                       <Pressable
                         key={m.id}
-                        onPress={() => { setSelectedModel(m.id); setTargetPickerOpen(false); }}
+                        onPress={() => {
+                          void setSelectedModel(m.id);
+                          // Remember this choice on the active conversation so
+                          // switching away and back restores the same model.
+                          useConversations.getState().patchActive({ modelId: m.id });
+                          setTargetPickerOpen(false);
+                        }}
                         style={[styles.modelRow, {
                           backgroundColor: active ? theme.colors.primarySoft : 'transparent',
                           borderColor: theme.colors.border,
