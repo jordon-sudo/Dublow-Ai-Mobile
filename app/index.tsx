@@ -5,22 +5,28 @@ import {
   KeyboardAvoidingView, Platform, StyleSheet, ActivityIndicator, Alert,
   Modal, ScrollView, ActionSheetIOS,
 } from 'react-native';
-import { Link } from 'expo-router';
+import { Link, useLocalSearchParams, useRouter } from 'expo-router';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
-import Markdown from 'react-native-markdown-display';
 import { useSettings } from '../src/store/settingsStore';
 import { useChat } from '../src/store/chatStore';
+import { useConversations, ChatMsg } from '../src/store/conversationsStore';
+import { usePrompts, PERSONAL_FOLDER_ID } from '../src/store/promptsStore';
+import { useOfflineQueue } from '../src/store/offlineQueueStore';
+import { useConnectivity } from '../src/hooks/useConnectivity';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { TOOL_CATALOG, groupedTools, ToolDef } from '../src/lib/tools';
 import { StatusBubble } from '../src/components/StatusBubble';
+import AssistantMarkdown from '../src/components/AssistantMarkdown';
 import type { StreamStatus } from '../src/lib/hatzClient';
 import ConversationsDrawer from '../src/components/ConversationsDrawer';
+import MessageActionSheet, { MessageAction } from '../src/components/MessageActionSheet';
+import ModelPickerSheet from '../src/components/ModelPickerSheet';
+import { copyText, shareText, buildQuoteMarkdown, deriveTitleFromMessage } from '../src/lib/messageActions';
 
-// Accepted file types for Hatz uploads.
 const ACCEPTED_EXTENSIONS = [
   'pdf', 'doc', 'docx', 'txt', 'md', 'rtf',
   'csv', 'xls', 'xlsx',
@@ -28,36 +34,26 @@ const ACCEPTED_EXTENSIONS = [
   'json', 'xml', 'html', 'htm',
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'heic',
 ];
-
 const ACCEPTED_MIME_PREFIXES = [
-  'application/pdf',
-  'application/msword',
+  'application/pdf', 'application/msword',
   'application/vnd.openxmlformats-officedocument',
-  'application/vnd.ms-excel',
-  'application/vnd.ms-powerpoint',
-  'text/',
-  'image/',
-  'application/json',
-  'application/xml',
+  'application/vnd.ms-excel', 'application/vnd.ms-powerpoint',
+  'text/', 'image/', 'application/json', 'application/xml',
 ];
 
 function isAcceptedFile(name: string, mime: string): boolean {
   const lowerName = (name || '').toLowerCase();
   const ext = lowerName.includes('.') ? lowerName.split('.').pop()! : '';
   const lowerMime = (mime || '').toLowerCase();
-
   if (ACCEPTED_EXTENSIONS.includes(ext)) return true;
   if (ACCEPTED_MIME_PREFIXES.some((p) => lowerMime.startsWith(p))) return true;
   return false;
 }
-
 function prettyExt(name: string): string {
   const lower = (name || '').toLowerCase();
   const ext = lower.includes('.') ? lower.split('.').pop()! : '';
   return ext ? `.${ext}` : 'this file type';
 }
-
-// RFC4122 v4 UUID — used as scope_id for chat file uploads.
 function uuidv4(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
@@ -81,6 +77,19 @@ export default function ChatScreen() {
     setActiveTools, setAutoTools, addAttachedFileId, removeAttachedFileId,
   } = useChat();
 
+  const activeId = useConversations((s) => s.activeId);
+  const truncateActiveAt = useConversations((s) => s.truncateActiveAt);
+  const removeLastAssistantMessage = useConversations((s) => s.removeLastAssistantMessage);
+  const forkActiveAsNew = useConversations((s) => s.forkActiveAsNew);
+
+  const createPrompt = usePrompts((s) => s.createPrompt);
+
+  const enqueue = useOfflineQueue((s) => s.enqueue);
+  const getForConversation = useOfflineQueue((s) => s.getForConversation);
+  const removeFromQueue = useOfflineQueue((s) => s.remove);
+  const recordAttempt = useOfflineQueue((s) => s.recordAttempt);
+  const queueState = useOfflineQueue((s) => s.queue);
+
   const [input, setInput] = useState('');
   const [streamStatus, setStreamStatus] = useState<StreamStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -90,11 +99,16 @@ export default function ChatScreen() {
   const listRef = useRef<FlatList>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // Per-chat scope for file uploads; rotates on "New Chat".
-  const [chatScopeId, setChatScopeId] = useState<string>(() => uuidv4());
+  // Message-level action state
+  const [actionSheetOpen, setActionSheetOpen] = useState(false);
+  const [selectedMsg, setSelectedMsg] = useState<ChatMsg | null>(null);
+  const [selectedIdx, setSelectedIdx] = useState<number>(-1);
+  const [regenPickerOpen, setRegenPickerOpen] = useState(false);
 
-  // Map of file UUID -> human-readable name, for the attachment chips.
+  const [chatScopeId, setChatScopeId] = useState<string>(() => uuidv4());
   const [fileNames, setFileNames] = useState<Record<string, string>>({});
+
+  const replayingRef = useRef(false);
 
   useEffect(() => {
     if (messages.length === 0) {
@@ -104,33 +118,29 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const currentTarget = models.find((m) => m.id === selectedModel);
-  const canSend = !!apiKey && !!selectedModel && input.trim().length > 0 && !busy;
-
-  const send = async () => {
+  /**
+   * Stream a completion against the active conversation using the given modelId.
+   * Extracted so both the regular send path AND the Regenerate action can share
+   * it. Assumes caller has already mutated the conversation (appended user
+   * message for send, removed last assistant for regenerate).
+   */
+  const streamCompletion = async (modelId: string) => {
     const client = getClient();
-    if (!client || !selectedModel) return;
-    const userText = input.trim();
-    if (!userText) return;
-
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    setInput('');
-    appendUser(userText);
-    appendAssistantDelta('');
+    if (!client) return;
     setBusy(true);
+    setStreamStatus({ kind: 'thinking' });
+    appendAssistantDelta('');
 
     const sys = useSettings.getState().systemPrompt?.trim();
     const base = useChat.getState().messages
       .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
       .map(({ role, content }) => ({ role, content }));
     const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
+    const isAgent = models.find((m) => m.id === modelId)?.kind === 'agent';
 
-    setStreamStatus({ kind: 'thinking' });
     await client.streamChat(
       {
-        ...(models.find((m) => m.id === selectedModel)?.kind === 'agent'
-          ? { agent_id: selectedModel }
-          : { model: selectedModel }),
+        ...(isAgent ? { agent_id: modelId } : { model: modelId }),
         messages: history,
         auto_tool_selection: autoTools,
         tools_to_use: autoTools ? undefined : activeTools,
@@ -148,6 +158,107 @@ export default function ChatScreen() {
     );
   };
 
+  const replayQueue = async () => {
+    if (replayingRef.current) return;
+    if (!activeId) return;
+    const client = getClient();
+    if (!client) return;
+    replayingRef.current = true;
+    try {
+      const pending = getForConversation(activeId);
+      for (const q of pending) {
+        appendAssistantDelta('');
+        setBusy(true);
+        setStreamStatus({ kind: 'thinking' });
+        const sys = useSettings.getState().systemPrompt?.trim();
+        const base = useChat.getState().messages
+          .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
+          .map(({ role, content }) => ({ role, content }));
+        const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
+        const isAgent = models.find((m) => m.id === q.targetId)?.kind === 'agent';
+        await new Promise<void>((resolve) => {
+          client.streamChat(
+            {
+              ...(isAgent ? { agent_id: q.targetId } : { model: q.targetId }),
+              messages: history,
+              auto_tool_selection: q.autoTools,
+              tools_to_use: q.autoTools ? undefined : q.activeTools,
+              file_uuids: [],
+            },
+            {
+              onToken: (delta) => appendAssistantDelta(delta),
+              onStatus: (s) => setStreamStatus(s),
+              onDone: () => {
+                finalizeAssistant(); setStreamStatus(null); setBusy(false);
+                removeFromQueue(q.id); resolve();
+              },
+              onError: (err) => {
+                appendAssistantDelta(`\n\n_Error: ${err.message}_`);
+                finalizeAssistant(); setStreamStatus(null); setBusy(false);
+                recordAttempt(q.id, err.message); resolve();
+              },
+            },
+          );
+        });
+      }
+    } finally {
+      replayingRef.current = false;
+    }
+  };
+
+  const { isOnline, isInitialized } = useConnectivity({ onReconnect: replayQueue });
+  const router = useRouter();
+  const params = useLocalSearchParams<{ prefill?: string }>();
+
+  useEffect(() => {
+    if (typeof params.prefill === 'string' && params.prefill.length > 0) {
+      setInput(params.prefill);
+      router.setParams({ prefill: '' });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.prefill]);
+
+  useEffect(() => {
+    if (isOnline && isInitialized && activeId) {
+      const pending = getForConversation(activeId);
+      if (pending.length > 0) replayQueue();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isInitialized, activeId]);
+
+  const currentTarget = models.find((m) => m.id === selectedModel);
+  const canSend = !!apiKey && !!selectedModel && input.trim().length > 0 && !busy;
+
+  const send = async () => {
+    const userText = input.trim();
+    if (!userText) return;
+
+    if (!isOnline) {
+      if (attachedFileIds.length > 0) {
+        Alert.alert('Offline', 'Files cannot be sent while offline. Remove the attachment or wait for connectivity to return.');
+        return;
+      }
+      if (!activeId || !selectedModel) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+      setInput('');
+      appendUser(userText);
+      enqueue({
+        conversationId: activeId,
+        content: userText,
+        targetId: selectedModel,
+        autoTools,
+        activeTools,
+      });
+      return;
+    }
+
+    if (!selectedModel) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setInput('');
+    appendUser(userText);
+    await streamCompletion(selectedModel);
+  };
+
   const confirmClear = () => {
     if (messages.length === 0) return;
     Alert.alert('Start a new chat?', 'This will delete the current conversation.', [
@@ -155,56 +266,176 @@ export default function ChatScreen() {
       {
         text: 'New Chat',
         style: 'destructive',
-        onPress: () => {
-          clear();
-          setFileNames({});
-        },
+        onPress: () => { clear(); setFileNames({}); },
       },
     ]);
   };
 
-  // ---------- Attachments ----------
+  // -------------------- Message-level action handlers --------------------
+
+  /**
+   * Opens the action sheet against a given message. Called from long-press
+   * on any rendered bubble.
+   */
+  const openMessageActions = (msg: ChatMsg, index: number) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    setSelectedMsg(msg);
+    setSelectedIdx(index);
+    setActionSheetOpen(true);
+  };
+
+  /**
+   * Dispatches the chosen action from MessageActionSheet. All six actions
+   * are handled here. The sheet has already closed itself before this fires.
+   */
+  const handleMessageAction = async (action: MessageAction) => {
+    const msg = selectedMsg;
+    const idx = selectedIdx;
+    if (!msg) return;
+
+    switch (action) {
+      case 'copy': {
+        const ok = await copyText(msg.content);
+        if (ok) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        } else {
+          Alert.alert('Copy failed', 'The system clipboard could not be written.');
+        }
+        break;
+      }
+
+      case 'share': {
+        const ok = await shareText(msg.content, msg.role === 'user' ? 'My message' : 'Assistant message');
+        if (ok) Haptics.selectionAsync().catch(() => {});
+        break;
+      }
+
+      case 'quote_new_chat': {
+        // Fork a new conversation, then navigate with the quoted markdown as prefill.
+        const { draftBody } = forkActiveAsNew(buildQuoteMarkdown(msg.content));
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        // Router push on same route with prefill param. The useEffect above
+        // will populate the composer. We give the store a tick to settle
+        // the active conversation switch before setting params.
+        setTimeout(() => {
+          router.setParams({ prefill: draftBody });
+        }, 50);
+        break;
+      }
+
+      case 'save_as_prompt': {
+        const title = deriveTitleFromMessage(msg.content);
+        const promptId = createPrompt({
+          title,
+          body: msg.content,
+          folderId: PERSONAL_FOLDER_ID,
+          tags: [],
+        });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        Alert.alert(
+          'Saved to Prompt Library',
+          `"${title}" was added to your Personal folder. Edit it anytime from Settings -> Manage Prompts.`,
+          [
+            { text: 'OK', style: 'default' },
+            {
+              text: 'Edit Now',
+              onPress: () => router.push({ pathname: '/prompt-edit', params: { id: promptId } }),
+            },
+          ],
+        );
+        break;
+      }
+
+      case 'edit_resend': {
+        if (idx < 0) return;
+        // Confirm before truncation — this is destructive.
+        Alert.alert(
+          'Edit and Resend?',
+          'This will remove this message and everything after it, then load the text into your composer so you can edit and resend.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Continue',
+              style: 'destructive',
+              onPress: () => {
+                const originalContent = msg.content;
+                truncateActiveAt(idx);
+                setInput(originalContent);
+                Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+              },
+            },
+          ],
+        );
+        break;
+      }
+
+      case 'regenerate': {
+        // Open the model picker. The confirm handler will perform the regen.
+        setRegenPickerOpen(true);
+        break;
+      }
+    }
+  };
+
+  /**
+   * Called when the user confirms a model in ModelPickerSheet during a
+   * Regenerate flow. Strips the trailing assistant message, re-streams
+   * against the chosen model, and persists that model on the conversation
+   * so future sends use it too.
+   */
+  const handleRegenerateWithModel = async (modelId: string) => {
+    setRegenPickerOpen(false);
+
+    // Persist the model choice on the conversation record and in settings
+    // so the composer reflects it from here on.
+    await setSelectedModel(modelId);
+    useConversations.getState().patchActive({ modelId });
+
+    // Strip the last assistant message, then re-stream a fresh one.
+    removeLastAssistantMessage();
+    // Give the store a tick to settle before we read messages for history.
+    setTimeout(() => {
+      streamCompletion(modelId);
+    }, 0);
+  };
 
   const uploadAsset = async (asset: AttachedAsset) => {
-  const client = getClient();
-  const apps = useSettings.getState().apps;
-  if (!client) return;
+    const client = getClient();
+    const apps = useSettings.getState().apps;
+    if (!client) return;
 
-  // Client-side type guard.
-  if (!isAcceptedFile(asset.name, asset.type)) {
-    Alert.alert(
-      'Unsupported file type',
-      `Hatz does not accept ${prettyExt(asset.name)} files.\n\nSupported formats include PDF, Word, Excel, PowerPoint, text, CSV, JSON, and common image types (PNG, JPG, GIF, WEBP, HEIC).\n\nIf you need this file, export or convert it to a supported format and try again.`,
-    );
-    return;
-  }
+    if (!isAcceptedFile(asset.name, asset.type)) {
+      Alert.alert(
+        'Unsupported file type',
+        `Hatz does not accept ${prettyExt(asset.name)} files.\n\nSupported formats include PDF, Word, Excel, PowerPoint, text, CSV, JSON, and common image types (PNG, JPG, GIF, WEBP, HEIC).\n\nIf you need this file, export or convert it to a supported format and try again.`,
+      );
+      return;
+    }
 
-  const scopeApp = apps.find((a: any) => a.id);
-  if (!scopeApp?.id) {
-    Alert.alert(
-      'Cannot upload',
-      'No app found in your Hatz workspace. File uploads require at least one app in your account. Please create an app at ai.hatz.ai and try again.',
-    );
-    return;
-  }
+    const scopeApp = apps.find((a: any) => a.id);
+    if (!scopeApp?.id) {
+      Alert.alert(
+        'Cannot upload',
+        'No app found in your Hatz workspace. File uploads require at least one app in your account. Please create an app at ai.hatz.ai and try again.',
+      );
+      return;
+    }
 
-  try {
-    setUploading(true);
-    console.log('[upload] starting', asset.name, asset.type, 'scope=app', scopeApp.id);
-    const uuid = await client.uploadFile(
-      { uri: asset.uri, name: asset.name, type: asset.type },
-      { scopeType: 'app', scopeId: scopeApp.id },
-    );
-    await addAttachedFileId(uuid);
-    setFileNames((prev) => ({ ...prev, [uuid]: asset.name }));
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-  } catch (e: any) {
-    console.warn('[upload] failed', e?.message || e);
-    Alert.alert('Upload failed', e?.message ?? 'Unknown error');
-  } finally {
-    setUploading(false);
-  }
-};
+    try {
+      setUploading(true);
+      const uuid = await client.uploadFile(
+        { uri: asset.uri, name: asset.name, type: asset.type },
+        { scopeType: 'app', scopeId: scopeApp.id },
+      );
+      await addAttachedFileId(uuid);
+      setFileNames((prev) => ({ ...prev, [uuid]: asset.name }));
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    } catch (e: any) {
+      Alert.alert('Upload failed', e?.message ?? 'Unknown error');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const pickDocument = async () => {
     const res = await DocumentPicker.getDocumentAsync({ multiple: false, copyToCacheDirectory: true });
@@ -219,50 +450,30 @@ export default function ChatScreen() {
 
   const pickPhoto = async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert('Permission needed', 'Photo library access is required.');
-      return;
-    }
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.9,
-    });
+    if (!perm.granted) { Alert.alert('Permission needed', 'Photo library access is required.'); return; }
+    const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9 });
     if (res.canceled || !res.assets?.[0]) return;
     const a = res.assets[0];
-    await uploadAsset({
-      uri: a.uri,
-      name: a.fileName ?? `photo-${Date.now()}.jpg`,
-      type: a.mimeType ?? 'image/jpeg',
-    });
+    await uploadAsset({ uri: a.uri, name: a.fileName ?? `photo-${Date.now()}.jpg`, type: a.mimeType ?? 'image/jpeg' });
   };
 
   const takePhoto = async () => {
     const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert('Permission needed', 'Camera access is required.');
-      return;
-    }
-    const res = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      quality: 0.9,
-    });
+    if (!perm.granted) { Alert.alert('Permission needed', 'Camera access is required.'); return; }
+    const res = await ImagePicker.launchCameraAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.9 });
     if (res.canceled || !res.assets?.[0]) return;
     const a = res.assets[0];
-    await uploadAsset({
-      uri: a.uri,
-      name: a.fileName ?? `photo-${Date.now()}.jpg`,
-      type: a.mimeType ?? 'image/jpeg',
-    });
+    await uploadAsset({ uri: a.uri, name: a.fileName ?? `photo-${Date.now()}.jpg`, type: a.mimeType ?? 'image/jpeg' });
   };
 
   const openAttachmentSheet = () => {
-    console.log('[attach] opening sheet');
+    if (!isOnline) {
+      Alert.alert('Offline', 'Files cannot be attached while offline.');
+      return;
+    }
     if (Platform.OS === 'ios') {
       ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: ['Cancel', 'Take Photo', 'Choose Photo', 'Choose File'],
-          cancelButtonIndex: 0,
-        },
+        { options: ['Cancel', 'Take Photo', 'Choose Photo', 'Choose File'], cancelButtonIndex: 0 },
         (idx) => {
           if (idx === 1) takePhoto();
           else if (idx === 2) pickPhoto();
@@ -280,9 +491,7 @@ export default function ChatScreen() {
   };
 
   const toggleTool = (id: string) => {
-    const next = activeTools.includes(id)
-      ? activeTools.filter((t) => t !== id)
-      : [...activeTools, id];
+    const next = activeTools.includes(id) ? activeTools.filter((t) => t !== id) : [...activeTools, id];
     setActiveTools(next);
   };
 
@@ -294,9 +503,7 @@ export default function ChatScreen() {
             <Ionicons name="sparkles" size={32} color={theme.colors.primary} />
           </View>
           <Text style={[styles.emptyTitle, { color: theme.colors.text }]}>Welcome to Hatz Chat</Text>
-          <Text style={[styles.emptySub, { color: theme.colors.textMuted }]}>
-            Add your API key and pick a model to get started.
-          </Text>
+          <Text style={[styles.emptySub, { color: theme.colors.textMuted }]}>Add your API key and pick a model to get started.</Text>
           <Link href="/settings" asChild>
             <Pressable style={[styles.primaryBtn, { backgroundColor: theme.colors.primary }]}>
               <Ionicons name="settings-outline" size={18} color={theme.colors.primaryText} />
@@ -308,7 +515,9 @@ export default function ChatScreen() {
     );
   }
 
- return (
+  const pendingForConv = activeId ? getForConversation(activeId) : [];
+
+  return (
     <SafeAreaView edges={['top']} style={[styles.safe, { backgroundColor: theme.colors.bg }]}>
       <View style={[styles.header, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
         <View style={{ flex: 1 }}>
@@ -335,6 +544,15 @@ export default function ChatScreen() {
         </Link>
       </View>
 
+      {!isOnline && isInitialized ? (
+        <View style={[stylesOffline.banner, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
+          <Ionicons name="cloud-offline-outline" size={14} color={theme.colors.textMuted} />
+          <Text style={{ color: theme.colors.textMuted, fontSize: fontSize.xs, marginLeft: 6 }}>
+            Offline - messages will send when connectivity returns.
+          </Text>
+        </View>
+      ) : null}
+
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <FlatList
           ref={listRef}
@@ -343,39 +561,50 @@ export default function ChatScreen() {
           contentContainerStyle={{ padding: spacing.md, paddingBottom: spacing.lg }}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           ListEmptyComponent={<View />}
-          renderItem={({ item }) => {
+          extraData={queueState}
+          renderItem={({ item, index }) => {
             const isUser = item.role === 'user';
             if (!isUser) {
+              // Assistant bubble — long-press opens MessageActionSheet against this message.
               return (
-                <View style={styles.assistantWrap}>
-                  <Markdown
+                <Pressable
+                  onLongPress={() => openMessageActions(item, index)}
+                  delayLongPress={350}
+                  style={styles.assistantWrap}
+                >
+                  <AssistantMarkdown
                     style={{
                       body: { color: theme.colors.assistantText, fontSize: fontSize.md, lineHeight: 26 },
                       paragraph: { marginTop: 0, marginBottom: spacing.md },
-                      code_inline: { backgroundColor: theme.colors.surfaceAlt, color: theme.colors.text, paddingHorizontal: 4, borderRadius: 4 },
-                      fence: { backgroundColor: theme.colors.surfaceAlt, color: theme.colors.text, padding: spacing.md, borderRadius: radii.md },
                       link: { color: theme.colors.primary },
                     }}
                   >
                     {item.content || '…'}
-                  </Markdown>
-                </View>
+                  </AssistantMarkdown>
+                </Pressable>
               );
             }
+            const isPending = pendingForConv.some((q) => q.content === item.content);
             return (
-              <View style={[styles.userBubble, { backgroundColor: theme.colors.bubbleUser }]}>
-                <Text style={{ color: theme.colors.bubbleUserText, fontSize: fontSize.md, lineHeight: 22 }}>
-                  {item.content}
-                </Text>
-              </View>
+              <Pressable
+                onLongPress={() => openMessageActions(item, index)}
+                delayLongPress={350}
+                style={[styles.userBubble, { backgroundColor: theme.colors.bubbleUser, opacity: isPending ? 0.65 : 1 }]}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <Text style={{ color: theme.colors.bubbleUserText, fontSize: fontSize.md, lineHeight: 22, flexShrink: 1 }}>
+                    {item.content}
+                  </Text>
+                  {isPending ? (
+                    <Ionicons name="time-outline" size={14} color={theme.colors.bubbleUserText} style={{ marginLeft: 6, opacity: 0.8 }} />
+                  ) : null}
+                </View>
+              </Pressable>
             );
           }}
         />
-        {busy && streamStatus && streamStatus.kind !== 'writing' ? (
-          <StatusBubble status={streamStatus} />
-        ) : null}
+        {busy && streamStatus && streamStatus.kind !== 'writing' ? <StatusBubble status={streamStatus} /> : null}
 
-        {/* Attachment chips — shows real file names above the composer */}
         {attachedFileIds.length > 0 && (
           <View style={[styles.filesStrip, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>
@@ -384,10 +613,14 @@ export default function ChatScreen() {
                 return (
                   <View key={id} style={[styles.fileChip, { backgroundColor: theme.colors.surfaceAlt, borderColor: theme.colors.border }]}>
                     <Ionicons name="document-outline" size={14} color={theme.colors.textMuted} />
-                    <Text numberOfLines={1} style={{ color: theme.colors.text, fontSize: fontSize.xs, maxWidth: 160 }}>
-                      {label}
-                    </Text>
-                    <Pressable onPress={() => { removeAttachedFileId(id); setFileNames((p) => { const n = { ...p }; delete n[id]; return n; }); }} hitSlop={8}>
+                    <Text numberOfLines={1} style={{ color: theme.colors.text, fontSize: fontSize.xs, maxWidth: 160 }}>{label}</Text>
+                    <Pressable
+                      onPress={() => {
+                        removeAttachedFileId(id);
+                        setFileNames((p) => { const n = { ...p }; delete n[id]; return n; });
+                      }}
+                      hitSlop={8}
+                    >
                       <Ionicons name="close" size={14} color={theme.colors.textMuted} />
                     </Pressable>
                   </View>
@@ -428,11 +661,11 @@ export default function ChatScreen() {
           </View>
 
           <View style={styles.dock}>
-            <Pressable onPress={openAttachmentSheet} style={styles.dockIcon} hitSlop={8} disabled={uploading}>
+            <Pressable onPress={openAttachmentSheet} style={styles.dockIcon} hitSlop={8} disabled={uploading || !isOnline}>
               {uploading ? (
                 <ActivityIndicator size="small" color={theme.colors.text} />
               ) : (
-                <Ionicons name="add" size={22} color={theme.colors.text} />
+                <Ionicons name="add" size={22} color={isOnline ? theme.colors.text : theme.colors.textMuted} />
               )}
             </Pressable>
 
@@ -478,7 +711,7 @@ export default function ChatScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* Target picker */}
+      {/* Target picker (existing header model/agent picker) */}
       <Modal visible={targetPickerOpen} transparent animationType="slide" onRequestClose={() => setTargetPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setTargetPickerOpen(false)}>
           <Pressable
@@ -529,7 +762,7 @@ export default function ChatScreen() {
         </Pressable>
       </Modal>
 
-{/* Tools picker */}
+      {/* Tools picker */}
       <Modal visible={toolsPickerOpen} transparent animationType="slide" onRequestClose={() => setToolsPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setToolsPickerOpen(false)}>
           <Pressable
@@ -579,6 +812,27 @@ export default function ChatScreen() {
         </Pressable>
       </Modal>
 
+      {/* NEW: Message action sheet (long-press on any bubble) */}
+      <MessageActionSheet
+        visible={actionSheetOpen}
+        onClose={() => setActionSheetOpen(false)}
+        message={selectedMsg}
+        messageIndex={selectedIdx}
+        totalMessages={messages.length}
+        isStreaming={busy}
+        onAction={handleMessageAction}
+      />
+
+      {/* NEW: Model picker for Regenerate flow */}
+      <ModelPickerSheet
+        visible={regenPickerOpen}
+        onClose={() => setRegenPickerOpen(false)}
+        initialSelectedId={useConversations.getState().getActive()?.modelId ?? selectedModel}
+        title="Regenerate with model"
+        caption="This response will be regenerated using the chosen model."
+        onConfirm={handleRegenerateWithModel}
+      />
+
       <ConversationsDrawer visible={drawerOpen} onClose={() => setDrawerOpen(false)} />
     </SafeAreaView>
   );
@@ -599,7 +853,6 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
   },
   primaryBtnText: { fontSize: fontSize.md, fontWeight: '600' },
-
   header: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
@@ -609,7 +862,6 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: fontSize.lg, fontWeight: '700' },
   headerSub: { fontSize: fontSize.xs, marginTop: 2 },
   iconBtn: { padding: spacing.sm, marginLeft: spacing.xs },
-
   assistantWrap: { paddingHorizontal: spacing.xs, paddingVertical: spacing.sm, marginBottom: spacing.sm },
   userBubble: {
     alignSelf: 'flex-end',
@@ -617,17 +869,16 @@ const styles = StyleSheet.create({
     borderRadius: radii.xl,
     marginVertical: spacing.xs, maxWidth: '85%',
   },
-
   filesStrip: {
     borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
   },
   fileChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: spacing.sm, paddingVertical: 6,
     borderRadius: radii.pill, borderWidth: StyleSheet.hairlineWidth,
   },
-
   composer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: spacing.md,
@@ -666,7 +917,6 @@ const styles = StyleSheet.create({
     width: 38, height: 38, borderRadius: radii.pill,
     alignItems: 'center', justifyContent: 'center',
   },
-
   modalBackdrop: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end',
   },
@@ -687,5 +937,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.md, paddingVertical: spacing.md,
     borderRadius: radii.md, borderWidth: StyleSheet.hairlineWidth,
+  },
+});
+
+const stylesOffline = StyleSheet.create({
+  banner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
 });

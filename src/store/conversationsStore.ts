@@ -5,7 +5,7 @@ import { sealJson, openJson } from '../lib/secureBlob';
 import { generateTitle } from '../lib/titleGen';
 
 const BLOB_KEY = 'hatz_conversations_v1';
-const LEGACY_CHAT_KEY = 'hatz_chat_v2'; // adjust if your existing chatStore uses a different key
+const LEGACY_CHAT_KEY = 'hatz_chat_v2';
 
 export interface ChatMsg {
   role: 'user' | 'assistant' | 'system';
@@ -24,6 +24,12 @@ export interface Conversation {
   attachedFileIds: string[];
   activeTools: string[];
   autoTools: boolean;
+  /**
+   * Optional per-conversation model override. When set, outbound completion
+   * requests should use this model name instead of the app-level default.
+   * Added to support the Regenerate action's per-run model picker.
+   */
+  modelId?: string;
 }
 
 interface Persisted {
@@ -49,19 +55,50 @@ interface State extends Persisted {
     q: string,
   ) => Array<{ conv: Conversation; hit: 'title' | 'message'; snippet: string }>;
 
-  // Active-conversation mutators (used by the chatStore shim in Part 3)
+  // Active-conversation mutators
   getActive: () => Conversation | null;
   patchActive: (patch: Partial<Conversation>) => void;
   appendUserToActive: (content: string) => void;
   appendAssistantDeltaToActive: (delta: string) => void;
   finalizeAssistantOnActive: () => Promise<void>;
   clearActive: () => Promise<void>;
+
+  // Message-level action helpers (added for Message Actions feature)
+  /**
+   * Truncate the active conversation's messages at `index`, removing
+   * the message at that index and everything after it. Used by Edit & Resend:
+   * the caller then populates the composer with the removed user message so
+   * the user can edit it and resend. Persists immediately.
+   */
+  truncateActiveAt: (index: number) => void;
+
+  /**
+   * Remove the final assistant message from the active conversation, if one
+   * exists as the last message. Used by Regenerate to clear the old response
+   * before streaming a new one. If the last message is not an assistant
+   * message, this is a no-op. Persists immediately.
+   */
+  removeLastAssistantMessage: () => void;
+
+  /**
+   * Create a brand-new conversation, copy the active conversation's tool
+   * settings and attached file IDs into it, optionally seed a composer draft
+   * for the caller to read out, mark it active, and return its id.
+   *
+   * Used by:
+   *   - Quote in new chat: caller passes the blockquote markdown as draftBody.
+   *   - Any future "start a new chat pre-filled with X" flow.
+   *
+   * The draft itself is NOT appended as a message — the caller is expected
+   * to populate the composer UI via a route param (?prefill=...). We return
+   * it here only so the caller does not have to thread a separate value.
+   */
+  forkActiveAsNew: (draftBody?: string) => { newId: string; draftBody: string };
 }
 
 /* ------------------------- helpers ------------------------- */
 
 function uid(): string {
-  // Lightweight id; no nanoid dep required.
   return (
     Date.now().toString(36) +
     '-' +
@@ -117,7 +154,6 @@ export const useConversations = create<State>((set, get) => ({
   hydrate: async () => {
     if (get().hydrated) return;
 
-    // 1. Try the encrypted v1 blob.
     const packed = await AsyncStorage.getItem(BLOB_KEY);
     const loaded = await openJson<Persisted>(packed);
 
@@ -134,12 +170,10 @@ export const useConversations = create<State>((set, get) => ({
       return;
     }
 
-    // 2. Migrate from the legacy single-thread store if present.
     const legacy = await AsyncStorage.getItem(LEGACY_CHAT_KEY);
     if (legacy) {
       try {
         const parsed = JSON.parse(legacy);
-        // Zustand persist wraps state in { state, version }. Handle both shapes.
         const root = parsed?.state ?? parsed;
         const legacyMsgs: ChatMsg[] = Array.isArray(root?.messages)
           ? root.messages
@@ -167,7 +201,6 @@ export const useConversations = create<State>((set, get) => ({
       }
     }
 
-    // 3. Fresh install — create one empty conversation.
     const conv = makeConversation({ title: 'New chat' });
     const next: Persisted = {
       conversations: { [conv.id]: conv },
@@ -219,7 +252,6 @@ export const useConversations = create<State>((set, get) => ({
 
     if (activeId === id) {
       activeId = order[0] ?? null;
-      // If we just deleted the last one, create a fresh empty conversation.
       if (!activeId) {
         const conv = makeConversation({ title: 'New chat' });
         rest[conv.id] = conv;
@@ -324,7 +356,8 @@ export const useConversations = create<State>((set, get) => ({
     if (!existing) return;
     const msgs = [...existing.messages];
     const last = msgs[msgs.length - 1];
-    if (last && last.role === 'assistant') {msgs[msgs.length - 1] = { ...last, content: (last.content || '') + delta };
+    if (last && last.role === 'assistant') {
+      msgs[msgs.length - 1] = { ...last, content: (last.content || '') + delta };
     } else {
       msgs.push({ role: 'assistant', content: delta, createdAt: Date.now() });
     }
@@ -335,7 +368,6 @@ export const useConversations = create<State>((set, get) => ({
     };
     const nextConvos = { ...conversations, [activeId]: updated };
     // Intentionally skip reorder + persist on every token — too chatty.
-    // Order refresh and persistence happen in finalizeAssistantOnActive.
     set({ conversations: nextConvos });
   },
 
@@ -345,12 +377,10 @@ export const useConversations = create<State>((set, get) => ({
     const existing = conversations[activeId];
     if (!existing) return;
 
-    // Refresh ordering + persist now that the stream has completed.
     const order = reorder({ conversations, order: [], activeId });
     set({ order });
     await persist({ conversations, order, activeId });
 
-    // Auto-title after the first complete exchange, unless the user renamed it.
     if (!existing.titleLocked) {
       const firstUser = existing.messages.find((m) => m.role === 'user');
       const firstAssistant = existing.messages.find((m) => m.role === 'assistant');
@@ -407,5 +437,66 @@ export const useConversations = create<State>((set, get) => ({
     const order = reorder({ conversations: nextConvos, order: [], activeId });
     set({ conversations: nextConvos, order });
     await persist({ conversations: nextConvos, order, activeId });
+  },
+
+  // -------------------- Message-level action helpers --------------------
+
+  truncateActiveAt: (index) => {
+    const { activeId, conversations } = get();
+    if (!activeId) return;
+    const existing = conversations[activeId];
+    if (!existing) return;
+    if (index < 0 || index >= existing.messages.length) return;
+    const updated: Conversation = {
+      ...existing,
+      messages: existing.messages.slice(0, index),
+      updatedAt: Date.now(),
+    };
+    const nextConvos = { ...conversations, [activeId]: updated };
+    const order = reorder({ conversations: nextConvos, order: [], activeId });
+    set({ conversations: nextConvos, order });
+    void persist({ conversations: nextConvos, order, activeId });
+  },
+
+  removeLastAssistantMessage: () => {
+    const { activeId, conversations } = get();
+    if (!activeId) return;
+    const existing = conversations[activeId];
+    if (!existing) return;
+    const msgs = existing.messages;
+    if (msgs.length === 0) return;
+    const last = msgs[msgs.length - 1];
+    if (last.role !== 'assistant') return;
+    const updated: Conversation = {
+      ...existing,
+      messages: msgs.slice(0, -1),
+      updatedAt: Date.now(),
+    };
+    const nextConvos = { ...conversations, [activeId]: updated };
+    const order = reorder({ conversations: nextConvos, order: [], activeId });
+    set({ conversations: nextConvos, order });
+    void persist({ conversations: nextConvos, order, activeId });
+  },
+
+  forkActiveAsNew: (draftBody) => {
+    const { activeId, conversations } = get();
+    const source = activeId ? conversations[activeId] : null;
+
+    // Carry over tool settings and the active model if set, but NOT messages
+    // or attached files. The new chat starts clean; the caller handles the
+    // composer prefill via router params.
+    const conv = makeConversation({
+      title: 'New chat',
+      activeTools: source?.activeTools ?? [],
+      autoTools: source?.autoTools ?? true,
+      modelId: source?.modelId,
+    });
+
+    const nextConvos = { ...conversations, [conv.id]: conv };
+    const order = reorder({ conversations: nextConvos, order: [], activeId: conv.id });
+    set({ conversations: nextConvos, order, activeId: conv.id });
+    void persist({ conversations: nextConvos, order, activeId: conv.id });
+
+    return { newId: conv.id, draftBody: draftBody ?? '' };
   },
 }));

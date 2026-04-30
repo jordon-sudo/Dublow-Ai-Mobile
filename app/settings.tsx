@@ -2,16 +2,18 @@
 import { useState } from 'react';
 import Constants from 'expo-constants';
 import {
-  View, Text, TextInput, Pressable, StyleSheet, ScrollView, Switch, Modal, Linking,
+  View, Text, TextInput, Pressable, StyleSheet, ScrollView, Switch, Modal, Linking, Alert,
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 import { useSettings } from '../src/store/settingsStore';
+import { usePrompts } from '../src/store/promptsStore';
 import { useTheme, spacing, radii, fontSize } from '../src/theme';
 import { groupedTools, ToolDef } from '../src/lib/tools';
-import { notifyJobComplete } from '../src/lib/notifications';
-
 
 export default function SettingsScreen() {
   const theme = useTheme();
@@ -22,6 +24,9 @@ export default function SettingsScreen() {
     defaultTools, setDefaultTools,
     defaultAutoTools, setDefaultAutoTools,
   } = useSettings();
+
+  const exportPromptsJSON = usePrompts((s) => s.exportJSON);
+  const importPromptsJSON = usePrompts((s) => s.importJSON);
 
   const [promptDraft, setPromptDraft] = useState(systemPrompt);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -35,6 +40,90 @@ export default function SettingsScreen() {
     setDefaultTools(next);
   };
 
+  const onManagePrompts = () => {
+    router.push('/prompts');
+  };
+
+  const onExportPrompts = async () => {
+    try {
+      const json = exportPromptsJSON();
+      const filename = `hatz-prompts-${new Date().toISOString().slice(0, 10)}.json`;
+      const uri = (FileSystem.cacheDirectory ?? FileSystem.documentDirectory) + filename;
+      await FileSystem.writeAsStringAsync(uri, json, { encoding: FileSystem.EncodingType.UTF8 });
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, {
+          mimeType: 'application/json',
+          dialogTitle: 'Export Prompt Library',
+          UTI: 'public.json',
+        });
+      } else {
+        Alert.alert('Exported', `Saved to ${uri}`);
+      }
+    } catch (e: any) {
+      Alert.alert('Export failed', e?.message ?? 'Unknown error');
+    }
+  };
+
+  const onImportPrompts = async () => {
+    try {
+      const res = await DocumentPicker.getDocumentAsync({
+        type: ['application/json', 'text/plain', '*/*'],
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (res.canceled || !res.assets?.[0]) return;
+      const asset = res.assets[0];
+      const raw = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.UTF8 });
+
+      Alert.alert(
+        'Import prompts',
+        'Merge with existing library, or replace it entirely?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Merge',
+            onPress: () => {
+              try {
+                const result = importPromptsJSON(raw, 'merge');
+                Alert.alert('Imported', `${result.prompts} prompt(s) merged into ${result.folders} folder(s).`);
+              } catch (e: any) {
+                Alert.alert('Import failed', e?.message ?? 'Invalid file');
+              }
+            },
+          },
+          {
+            text: 'Replace',
+            style: 'destructive',
+            onPress: () => {
+              Alert.alert(
+                'Replace library?',
+                'This will erase your current prompts. Personal and Dublow default folders are preserved.',
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  {
+                    text: 'Replace',
+                    style: 'destructive',
+                    onPress: () => {
+                      try {
+                        const result = importPromptsJSON(raw, 'replace');
+                        Alert.alert('Imported', `${result.prompts} prompt(s) loaded into ${result.folders} folder(s).`);
+                      } catch (e: any) {
+                        Alert.alert('Import failed', e?.message ?? 'Invalid file');
+                      }
+                    },
+                  },
+                ],
+              );
+            },
+          },
+        ],
+      );
+    } catch (e: any) {
+      Alert.alert('Import failed', e?.message ?? 'Unknown error');
+    }
+  };
+
   const appVersion = Constants.expoConfig?.version ?? '—';
   const buildNumber =
     Constants.expoConfig?.ios?.buildNumber ??
@@ -43,32 +132,32 @@ export default function SettingsScreen() {
 
   return (
     <SafeAreaView
-  style={[
-    styles.safe,
-    {
-      backgroundColor: theme.colors.bg,
-      marginTop: 0,
-      borderTopLeftRadius: 20,
-      borderTopRightRadius: 20,
-      overflow: 'hidden',
-    },
-  ]}
-  edges={['bottom']}
->
+      style={[
+        styles.safe,
+        {
+          backgroundColor: theme.colors.bg,
+          marginTop: 0,
+          borderTopLeftRadius: 20,
+          borderTopRightRadius: 20,
+          overflow: 'hidden',
+        },
+      ]}
+      edges={['bottom']}
+    >
       <Stack.Screen
-  options={{
-    headerShown: true,
-    title: 'Settings',
-    headerStyle: { backgroundColor: theme.colors.surface },
-    headerTitleStyle: { color: theme.colors.text },
-    headerTintColor: theme.colors.text,
-    headerLeft: () => (
-      <Pressable onPress={() => router.back()} hitSlop={10} style={{ paddingHorizontal: 8 }}>
-        <Ionicons name="close" size={24} color={theme.colors.text} />
-      </Pressable>
-    ),
-  }}
-/>
+        options={{
+          headerShown: true,
+          title: 'Settings',
+          headerStyle: { backgroundColor: theme.colors.surface },
+          headerTitleStyle: { color: theme.colors.text },
+          headerTintColor: theme.colors.text,
+          headerLeft: () => (
+            <Pressable onPress={() => router.back()} hitSlop={10} style={{ paddingHorizontal: 8 }}>
+              <Ionicons name="close" size={24} color={theme.colors.text} />
+            </Pressable>
+          ),
+        }}
+      />
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
 
         <Section title="Account" theme={theme}>
@@ -104,11 +193,42 @@ export default function SettingsScreen() {
             placeholder="e.g. You are a concise, senior technical assistant…"
             placeholderTextColor={theme.colors.textMuted}
           />
-  
+
           <Pressable onPress={savePrompt} style={[styles.secondaryBtn, { borderColor: theme.colors.border, marginTop: spacing.sm }]}>
             <Ionicons name="save-outline" size={16} color={theme.colors.text} />
             <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Save Prompt</Text>
           </Pressable>
+        </Section>
+
+        <Section title="Prompt Library" theme={theme}
+          caption="Reusable prompts organized into folders. Tap a prompt in the library to send it to your composer.">
+          <Pressable
+            onPress={onManagePrompts}
+            style={[styles.row, { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary }]}
+          >
+            <Ionicons name="bookmarks-outline" size={18} color={theme.colors.primaryText} />
+            <Text style={{ flex: 1, color: theme.colors.primaryText, fontSize: fontSize.md, fontWeight: '700' }}>
+              Manage Prompts
+            </Text>
+            <Ionicons name="chevron-forward" size={18} color={theme.colors.primaryText} />
+          </Pressable>
+
+          <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm }}>
+            <Pressable
+              onPress={onImportPrompts}
+              style={[styles.secondaryBtn, { borderColor: theme.colors.border, flex: 1 }]}
+            >
+              <Ionicons name="download-outline" size={16} color={theme.colors.text} />
+              <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Import JSON</Text>
+            </Pressable>
+            <Pressable
+              onPress={onExportPrompts}
+              style={[styles.secondaryBtn, { borderColor: theme.colors.border, flex: 1 }]}
+            >
+              <Ionicons name="share-outline" size={16} color={theme.colors.text} />
+              <Text style={[styles.secondaryBtnText, { color: theme.colors.text }]}>Export JSON</Text>
+            </Pressable>
+          </View>
         </Section>
 
         <Section title="Tool Defaults" theme={theme}
@@ -146,6 +266,7 @@ export default function SettingsScreen() {
             <Ionicons name="chevron-forward" size={18} color={theme.colors.textMuted} />
           </Pressable>
         </Section>
+
         <Section title="About" theme={theme}>
           <InfoRow label="App Version" value={appVersion} theme={theme} />
           <InfoRow label="Build" value={buildNumber} theme={theme} />
@@ -304,6 +425,5 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: spacing.md, paddingVertical: spacing.md,
     borderRadius: radii.md, borderWidth: StyleSheet.hairlineWidth,
-    marginBottom: spacing.sm,
   },
 });
