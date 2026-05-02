@@ -63,6 +63,13 @@ interface State extends Persisted {
   finalizeAssistantOnActive: () => Promise<void>;
   clearActive: () => Promise<void>;
 
+  // Conversation-scoped stream writers. Mirror the *ToActive mutators but
+  // target a specific conversation ID so an in-flight stream keeps writing
+  // to the conversation it started on even if the user switches away.
+  appendAssistantDeltaToConversation: (convId: string, delta: string) => void;
+  finalizeAssistantOnConversation: (convId: string) => Promise<void>;
+  removeLastAssistantMessageFromConversation: (convId: string) => void;
+
   // Message-level action helpers (added for Message Actions feature)
   /**
    * Truncate the active conversation's messages at `index`, removing
@@ -437,6 +444,96 @@ export const useConversations = create<State>((set, get) => ({
     const order = reorder({ conversations: nextConvos, order: [], activeId });
     set({ conversations: nextConvos, order });
     await persist({ conversations: nextConvos, order, activeId });
+  },
+
+  appendAssistantDeltaToConversation: (convId, delta) => {
+    const { conversations } = get();
+    const existing = conversations[convId];
+    if (!existing) return;
+    const msgs = [...existing.messages];
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === 'assistant') {
+      msgs[msgs.length - 1] = { ...last, content: (last.content || '') + delta };
+    } else {
+      msgs.push({ role: 'assistant', content: delta, createdAt: Date.now() });
+    }
+    const updated: Conversation = {
+      ...existing,
+      messages: msgs,
+      updatedAt: Date.now(),
+    };
+    const nextConvos = { ...conversations, [convId]: updated };
+    // Same as the *ToActive variant: skip reorder + persist on every token.
+    set({ conversations: nextConvos });
+  },
+
+  finalizeAssistantOnConversation: async (convId) => {
+    const { conversations, activeId } = get();
+    const existing = conversations[convId];
+    if (!existing) return;
+
+    const order = reorder({ conversations, order: [], activeId });
+    set({ order });
+    await persist({ conversations, order, activeId });
+
+    if (!existing.titleLocked) {
+      const firstUser = existing.messages.find((m) => m.role === 'user');
+      const firstAssistant = existing.messages.find((m) => m.role === 'assistant');
+      const shouldTitle =
+        !!firstUser &&
+        !!firstAssistant &&
+        (!existing.title || existing.title === 'New chat');
+
+      if (shouldTitle) {
+        try {
+          const title = await generateTitle(
+            firstUser!.content,
+            firstAssistant!.content,
+          );
+          const current = get().conversations[convId];
+          if (current && !current.titleLocked) {
+            const updated: Conversation = {
+              ...current,
+              title,
+              updatedAt: Date.now(),
+            };
+            const nextConvos = { ...get().conversations, [convId]: updated };
+            const nextOrder = reorder({
+              conversations: nextConvos,
+              order: [],
+              activeId: get().activeId,
+            });
+            set({ conversations: nextConvos, order: nextOrder });
+            await persist({
+              conversations: nextConvos,
+              order: nextOrder,
+              activeId: get().activeId,
+            });
+          }
+        } catch (e) {
+          console.warn('[conversationsStore] auto-title failed', e);
+        }
+      }
+    }
+  },
+
+  removeLastAssistantMessageFromConversation: (convId) => {
+    const { conversations, activeId } = get();
+    const existing = conversations[convId];
+    if (!existing) return;
+    const msgs = existing.messages;
+    if (msgs.length === 0) return;
+    const last = msgs[msgs.length - 1];
+    if (last.role !== 'assistant') return;
+    const updated: Conversation = {
+      ...existing,
+      messages: msgs.slice(0, -1),
+      updatedAt: Date.now(),
+    };
+    const nextConvos = { ...conversations, [convId]: updated };
+    const order = reorder({ conversations: nextConvos, order: [], activeId });
+    set({ conversations: nextConvos, order });
+    void persist({ conversations: nextConvos, order, activeId });
   },
 
   // -------------------- Message-level action helpers --------------------

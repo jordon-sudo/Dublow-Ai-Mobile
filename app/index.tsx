@@ -102,6 +102,9 @@ export default function ChatScreen() {
   const truncateActiveAt = useConversations((s) => s.truncateActiveAt);
   const removeLastAssistantMessage = useConversations((s) => s.removeLastAssistantMessage);
   const forkActiveAsNew = useConversations((s) => s.forkActiveAsNew);
+  const appendAssistantDeltaToConversation = useConversations((s) => s.appendAssistantDeltaToConversation);
+  const finalizeAssistantOnConversation = useConversations((s) => s.finalizeAssistantOnConversation);
+  const removeLastAssistantMessageFromConversation = useConversations((s) => s.removeLastAssistantMessageFromConversation);
 
   const createPrompt = usePrompts((s) => s.createPrompt);
 
@@ -171,40 +174,73 @@ export default function ChatScreen() {
   const streamCompletion = async (modelId: string) => {
     const client = getClient();
     if (!client) return;
+
+    // Pin this stream to the conversation that was active when it began.
+    // Every token, finalize, and error write will target this ID directly,
+    // so switching conversations mid-stream cannot redirect the response
+    // into another chat.
+    const pinnedConvId = useConversations.getState().activeId;
+    if (!pinnedConvId) return;
+
     setBusy(true);
     setStreamStatus({ kind: 'thinking' });
-    appendAssistantDelta('');
+    // Seed an empty assistant bubble on the pinned conversation.
+    appendAssistantDeltaToConversation(pinnedConvId, '');
 
+    // Build history from the pinned conversation, not "active" - otherwise
+    // if the user switches chats during setup we'd send the wrong history.
     const sys = useSettings.getState().systemPrompt?.trim();
-    const base = useChat.getState().messages
+    const pinnedConv = useConversations.getState().conversations[pinnedConvId];
+    const base = (pinnedConv?.messages ?? [])
       .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
       .map(({ role, content }) => ({ role, content }));
     const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
     const isAgent = models.find((m) => m.id === modelId)?.kind === 'agent';
 
+    // Capture session options too. If the user toggles tools or attachments
+    // after send, the request already in flight should be unaffected.
+    const pinnedAutoTools = pinnedConv?.autoTools ?? autoTools;
+    const pinnedActiveTools = pinnedConv?.activeTools ?? activeTools;
+    const pinnedFileIds = pinnedConv?.attachedFileIds ?? attachedFileIds;
+
     const startedAt = Date.now();
     track('chat_message_sent', {
       model_id: modelId,
       kind: isAgent ? 'agent' : 'model',
-      has_attachments: attachedFileIds.length > 0,
-      attachment_count: attachedFileIds.length,
-      tools_count: autoTools ? 0 : activeTools.length,
-      auto_tools: autoTools,
+      has_attachments: pinnedFileIds.length > 0,
+      attachment_count: pinnedFileIds.length,
+      tools_count: pinnedAutoTools ? 0 : pinnedActiveTools.length,
+      auto_tools: pinnedAutoTools,
     });
 
     await client.streamChat(
       {
         ...(isAgent ? { agent_id: modelId } : { model: modelId }),
         messages: history,
-        auto_tool_selection: autoTools,
-        tools_to_use: autoTools ? undefined : activeTools,
-        file_uuids: attachedFileIds,
+        auto_tool_selection: pinnedAutoTools,
+        tools_to_use: pinnedAutoTools ? undefined : pinnedActiveTools,
+        file_uuids: pinnedFileIds,
       },
       {
-        onToken: (delta) => appendAssistantDelta(delta),
-        onStatus: (s) => setStreamStatus(s),
+        onToken: (delta) => appendAssistantDeltaToConversation(pinnedConvId, delta),
+        onStatus: (s) => {
+          // Status is a transient UI affordance. Only reflect it if the user
+          // is still viewing the conversation this stream belongs to -
+          // otherwise it would show a spinner on an unrelated chat.
+          if (useConversations.getState().activeId === pinnedConvId) {
+            setStreamStatus(s);
+          }
+        },
         onDone: () => {
-          finalizeAssistant(); setStreamStatus(null); setBusy(false);
+          void finalizeAssistantOnConversation(pinnedConvId);
+          if (useConversations.getState().activeId === pinnedConvId) {
+            setStreamStatus(null);
+            setBusy(false);
+          } else {
+            // The user walked away; just clear local busy/status.
+            setStreamStatus(null);
+            setBusy(false);
+          }
           track('chat_message_received', {
             model_id: modelId,
             ok: true,
@@ -212,8 +248,10 @@ export default function ChatScreen() {
           });
         },
         onError: (err) => {
-          appendAssistantDelta(`\n\n_Error: ${err.message}_`);
-          finalizeAssistant(); setStreamStatus(null); setBusy(false);
+          appendAssistantDeltaToConversation(pinnedConvId, `\n\n_Error: ${err.message}_`);
+          void finalizeAssistantOnConversation(pinnedConvId);
+          setStreamStatus(null);
+          setBusy(false);
           track('chat_message_received', {
             model_id: modelId,
             ok: false,
@@ -233,17 +271,24 @@ export default function ChatScreen() {
     if (!client) return;
     replayingRef.current = true;
     try {
-      const pending = getForConversation(activeId);
+      // Pin to the conversation whose queued messages we're replaying.
+      // Even if the user switches chats partway through replay, queued
+      // responses should land on the conversation they were queued from.
+      const pinnedConvId = activeId;
+      const pending = getForConversation(pinnedConvId);
       for (const q of pending) {
-        appendAssistantDelta('');
+        appendAssistantDeltaToConversation(pinnedConvId, '');
         setBusy(true);
         setStreamStatus({ kind: 'thinking' });
+
         const sys = useSettings.getState().systemPrompt?.trim();
-        const base = useChat.getState().messages
+        const pinnedConv = useConversations.getState().conversations[pinnedConvId];
+        const base = (pinnedConv?.messages ?? [])
           .filter((m) => !(m.role === 'assistant' && m.content.length === 0))
           .map(({ role, content }) => ({ role, content }));
         const history = sys ? [{ role: 'system' as const, content: sys }, ...base] : base;
         const isAgent = models.find((m) => m.id === q.targetId)?.kind === 'agent';
+
         await new Promise<void>((resolve) => {
           client.streamChat(
             {
@@ -254,16 +299,26 @@ export default function ChatScreen() {
               file_uuids: [],
             },
             {
-              onToken: (delta) => appendAssistantDelta(delta),
-              onStatus: (s) => setStreamStatus(s),
+              onToken: (delta) => appendAssistantDeltaToConversation(pinnedConvId, delta),
+              onStatus: (s) => {
+                if (useConversations.getState().activeId === pinnedConvId) {
+                  setStreamStatus(s);
+                }
+              },
               onDone: () => {
-                finalizeAssistant(); setStreamStatus(null); setBusy(false);
-                removeFromQueue(q.id); resolve();
+                void finalizeAssistantOnConversation(pinnedConvId);
+                setStreamStatus(null);
+                setBusy(false);
+                removeFromQueue(q.id);
+                resolve();
               },
               onError: (err) => {
-                appendAssistantDelta(`\n\n_Error: ${err.message}_`);
-                finalizeAssistant(); setStreamStatus(null); setBusy(false);
-                recordAttempt(q.id, err.message); resolve();
+                appendAssistantDeltaToConversation(pinnedConvId, `\n\n_Error: ${err.message}_`);
+                void finalizeAssistantOnConversation(pinnedConvId);
+                setStreamStatus(null);
+                setBusy(false);
+                recordAttempt(q.id, err.message);
+                resolve();
               },
             },
           );
@@ -495,8 +550,14 @@ export default function ChatScreen() {
     track('model_changed', { model_id: modelId, source: 'regenerate' });
     track('message_regenerated', { model_id: modelId });
 
-    // Strip the last assistant message, then re-stream a fresh one.
-    removeLastAssistantMessage();
+    // Strip the last assistant message from the *current* conversation,
+    // then re-stream. streamCompletion will pin to activeId internally,
+    // so a chat switch after this point cannot redirect the regenerated
+    // response into the wrong conversation.
+    const convIdForRegen = useConversations.getState().activeId;
+    if (convIdForRegen) {
+      removeLastAssistantMessageFromConversation(convIdForRegen);
+    }
     // Give the store a tick to settle before we read messages for history.
     setTimeout(() => {
       streamCompletion(modelId);
@@ -671,10 +732,13 @@ export default function ChatScreen() {
           data={messages}
           keyExtractor={(_, i) => String(i)}
           contentContainerStyle={[
-            { padding: spacing.md, paddingBottom: spacing.lg },
+            // Extra bottom padding keeps the last line of streamed text from
+            // butting up against the composer. spacing.lg alone reads too
+            // tight during active scroll; add a fixed 10pt breathing room.
+            { padding: spacing.md, paddingBottom: spacing.lg + 46 },
             messages.length === 0 && { flexGrow: 1 },
           ]}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
           ListEmptyComponent={
             <ChatEmptyState
               modelLabel={currentTarget?.label ?? 'Select a model'}
@@ -836,10 +900,23 @@ export default function ChatScreen() {
       {/* Target picker (existing header model/agent picker) */}
       <Modal visible={targetPickerOpen} transparent animationType="slide" onRequestClose={() => setTargetPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setTargetPickerOpen(false)}>
-          <Pressable
-            style={[styles.modalSheet, { backgroundColor: theme.colors.surface, borderColor: theme.colors.border }]}
-            onPress={(e) => e.stopPropagation()}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            keyboardVerticalOffset={-insets.bottom}
+            style={{ width: '100%' }}
+            pointerEvents="box-none"
           >
+            <Pressable
+              style={[
+                styles.modalSheet,
+                {
+                  backgroundColor: theme.colors.surface,
+                  borderColor: theme.colors.border,
+                  maxHeight: '85%',
+                },
+              ]}
+              onPress={(e) => e.stopPropagation()}
+            >
             <View style={[styles.modalHandle, { backgroundColor: theme.colors.border }]} />
             <Text style={[styles.modalTitle, { color: theme.colors.text }]}>Select Model or Agent</Text>
 
@@ -872,7 +949,7 @@ export default function ChatScreen() {
               />
             </View>
 
-            <ScrollView style={{ maxHeight: 520 }} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{ flexGrow: 0, flexShrink: 1 }} keyboardShouldPersistTaps="handled">
               {getGroupedTargets()
                 .map((group) => {
                   const q = targetPickerQuery.trim().toLowerCase();
@@ -930,7 +1007,8 @@ export default function ChatScreen() {
                 </View>
               ))}
             </ScrollView>
-          </Pressable>
+            </Pressable>
+          </KeyboardAvoidingView>
         </Pressable>
       </Modal>
 

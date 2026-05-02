@@ -23,6 +23,7 @@ import AppInputForm, { type InputValues } from '../../src/components/AppInputFor
 import type { AppItem, UserInput } from '../../src/lib/appsTypes';
 import { isWorkflow } from '../../src/lib/appsTypes';
 import { useWorkflowJobs } from '../../src/store/workflowJobsStore';
+import { track, captureError } from '../../src/lib/telemetry';
 
 export default function WorkflowRunnerScreen() {
   const theme = useTheme();
@@ -59,6 +60,8 @@ export default function WorkflowRunnerScreen() {
       setApp(data);
     } catch (e: any) {
       setLoadError(e?.message ?? 'Failed to load workflow.');
+      track('workflow_detail_load_failed');
+      captureError(e, { where: 'workflow.load' });
     } finally {
       setLoading(false);
     }
@@ -76,25 +79,38 @@ export default function WorkflowRunnerScreen() {
   }, [app, values]);
 
  const run = async () => {
-  if (!client || !app) return;
-  setRunning(true);
-  setRunError(null);
-  try {
-    const id = (app as any).id ?? String(appId);
-    const { job_id } = await client.runWorkflow(id, values);
-    await trackJob({
-      job_id,
-      app_id: id,
-      app_name: app.name,
-      inputs: values,
-    });
-    router.replace(`/jobs/${job_id}` as any);
-  } catch (e: any) {
-    console.warn('[wf-run] failed', e?.message, e);
-    setRunError(e?.message ?? 'Run failed.');
-    setRunning(false);
-  }
-};
+    if (!client || !app) return;
+    setRunning(true);
+    setRunError(null);
+    try {
+      const id = (app as any).id ?? String(appId);
+
+      const inputCount = Object.keys(values).length;
+      const filledCount = Object.values(values).filter(
+        (v) => typeof v === 'string' ? v.trim().length > 0 : v != null,
+      ).length;
+      track('workflow_run_started', {
+        step_count: app.steps?.length ?? 0,
+        input_count: inputCount,
+        filled_count: filledCount,
+      });
+
+      const { job_id } = await client.runWorkflow(id, values);
+      await trackJob({
+        job_id,
+        app_id: id,
+        app_name: app.name,
+        inputs: values,
+      });
+      router.replace(`/jobs/${job_id}` as any);
+    } catch (e: any) {
+      console.warn('[wf-run] failed', e?.message, e);
+      setRunError(e?.message ?? 'Run failed.');
+      setRunning(false);
+      track('workflow_run_start_failed');
+      captureError(e, { where: 'workflow.run' });
+    }
+  };
 
   return (
     <SafeAreaView style={[styles.root, { backgroundColor: theme.colors.bg }]} edges={['top']}>

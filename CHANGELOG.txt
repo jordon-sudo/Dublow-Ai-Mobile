@@ -770,6 +770,7 @@ Added
 - app/prompt-fill.tsx: prompt_filled_submitted fires from both submit paths with { mode: 'complete' | 'as_is', placeholder_count, filled_count }. Values themselves are never sent.
 - app/apps.tsx: apps_tab_changed fires on TabView index change with { tab: 'apps' | 'workflows' }. apps_list_load_failed fires in the list load catch block alongside captureError(e, { where: 'apps.load' }). app_opened fires on item press with { kind: 'app' | 'workflow' } before router.push. Item names and IDs are never sent.
 - app/apps/[appId].tsx: app_detail_load_failed fires in the getAppRaw catch block alongside captureError(e, { where: 'app.load' }). app_run_started fires before the job handoff with { input_count, filled_count } — filled_count counts trimmed non-empty string values and non-null non-string values. app_run_start_failed fires if the handoff itself throws, paired with captureError(e, { where: 'app.run' }).
+- - app/workflows/[appId].tsx: workflow_detail_load_failed fires in the getAppRaw catch block alongside captureError(e, { where: 'workflow.load' }). workflow_run_started fires before runWorkflow with { step_count, input_count, filled_count }. workflow_run_start_failed fires if runWorkflow or trackJob throws, paired with captureError(e, { where: 'workflow.run' }).
 - src/lib/appRunRegistry.ts: startedAt captured at run registration. app_run_completed fires on both success and failure branches with { ok, latency } and adds { error_kind: err.name } on failure. captureError(e, { where: 'appRun.execute' }) on failure. Completion events live in the registry rather than the runner screen because the runner unmounts before the async run resolves.
 
 Changed
@@ -777,6 +778,57 @@ Changed
 
 Notes
 - All event properties pass through sanitize() in src/lib/telemetry.ts: primitives only, strings truncated to 64 chars, nullish values stripped. Any accidental content leakage fails closed.
-- app/workflows/[appId].tsx is not yet instrumented. workflow_run_started, workflow_step_started, workflow_step_completed, and workflow_run_completed remain to be wired — scheduled for v0.40.1.
-- error_shown (paired with user-facing Alert.alert surfaces) deferred; lower priority than the run/flow events shipped here.
+- Workflow run completion (workflow_run_completed with ok/latency/error_kind) lives in the job-polling layer, not the runner screen, because the runner unmounts before the async workflow resolves. Wiring it requires instrumenting workflowJobsStore's poll loop — deferred to a follow-up so this release stays scoped to the screens we audited.
+
+v0.40.1 - Fix: model picker search hidden by keyboard
+
+Fixed
+- app/index.tsx: target picker modal now wraps its sheet in a KeyboardAvoidingView (padding on iOS, height on Android) so the search input and results stay visible when the keyboard opens. RN Modal renders in a separate native window, so the chat screen's outer KeyboardAvoidingView does not apply to modal children.
+
+Changed
+- app/index.tsx: target picker sheet capped at maxHeight: '85%' and inner ScrollView switched from maxHeight: 520 to { flexGrow: 0, flexShrink: 1 } so it yields vertical space to the keyboard avoider instead of pinning the sheet at a fixed height.
+- app/index.tsx: KeyboardAvoidingView uses pointerEvents="box-none" to preserve backdrop tap-to-dismiss in the transparent area around the sheet.
+
+v0.40.2 - Pin streams to originating conversation
+
+Fixed
+- app/index.tsx, src/store/conversationsStore.ts: assistant stream tokens no longer follow the user when switching conversations mid-response. Every write during a stream (tokens, finalize, error) now targets the conversation ID captured at stream start instead of the currently-active ID.
+- app/index.tsx: offline queue replay pins to the conversation being replayed so queued responses land on the correct chat even if the user navigates away during replay.
+- app/index.tsx: Regenerate flow uses the scoped remover so the old assistant message is deleted from the originating conversation, not whatever is active when the regen call settles.
+- src/components/UsageBanner.tsx: swipe-to-dismiss now fires correctly. PanResponder callbacks were closing over a stale `kind` value from first render; the value is now mirrored into a ref and read at gesture time.
+- src/components/UsageBanner.tsx: Settings-surface banner is pinned. When dismissible={false} the close button is hidden, swipe gestures are ignored, and the banner reads from selectActualKind so chat-surface dismissals do not hide it.
+
+Added
+- src/store/conversationsStore.ts: appendAssistantDeltaToConversation(convId, delta), finalizeAssistantOnConversation(convId), and removeLastAssistantMessageFromConversation(convId). Mirror the *ToActive mutators but target a specific conversation ID. Used exclusively by the chat screen's pinned stream path.
+- src/store/usageStore.ts: selectActualKind(s) selector. Returns the raw severity derived from totalUsed/totalLimit, ignoring dismissedKind. Used by pinned UsageBanner instances.
+- src/components/UsageBanner.tsx: dismissible?: boolean prop (default true). When false, the close button is omitted and swipe is force-disabled regardless of swipeToDismiss.
+
+Changed
+- app/index.tsx: target-picker modal wrapped in KeyboardAvoidingView with keyboardVerticalOffset={-insets.bottom} so the search input stays visible and flush against the keyboard. Sheet capped at maxHeight: '85%' and inner ScrollView switched from maxHeight: 520 to { flexGrow: 0, flexShrink: 1 } so it yields vertical space to the keyboard avoider.
+- app/settings.tsx: UsageBanner rendered with dismissible={false} so the upgrade prompt persists until actual usage drops.
+
+Notes
+- Stream status (the thinking spinner) is only reflected locally when the active conversation still matches the stream's pinned ID, preventing a spinner from appearing on an unrelated chat the user navigated to mid-stream.
+
+v0.40.3 - Smoother auto-scroll during streaming
+
+Fixed
+- app/index.tsx: FlatList auto-scroll uses animated: !busy instead of animated: true. Animated scrollToEnd queued a new 250ms tween on every streamed token, producing stuttery "catch up" behavior as each delta cancelled the in-flight animation. Unanimated scroll during streams tracks token growth directly; animated scroll is retained for idle appends (new user messages, regenerations, queued replays).
+
+Changed
+- app/index.tsx: FlatList uses maintainVisibleContentPosition ({ minIndexForVisible: 0, autoscrollToTopThreshold: 10 }) so users scrolled up to read earlier messages stay put instead of being dragged down by each streamed token. When the user is at the bottom, scrollToEnd continues to pin them there.
+- app/index.tsx: auto-follow during streaming now uses an atBottomRef driven by onScroll instead of maintainVisibleContentPosition. MVCP's top-anchor behavior cancelled scrollToEnd even when the user was at the bottom, breaking auto-follow entirely. The new approach tracks distance-from-bottom (40pt dead-zone) and only calls scrollToEnd when the user is already pinned to the end, so streaming tokens auto-follow while a user who has scrolled up to read history stays put.
+
+v0.40.4 - Revert auto-scroll experiments; keep minimal fix
+
+Changed
+- app/index.tsx: FlatList onContentSizeChange reverted to the minimal scrollToEnd({ animated: false }) call. The animated-true version stutters during streaming because each token queues a new 250ms tween that cancels the last. The user-intent-tracking variants (atBottomRef via onScroll / onScrollBeginDrag + onMomentumScrollEnd) did not reliably auto-follow in this environment and were removed.
+
+Removed
+- app/index.tsx: atBottomRef and its scroll-event handlers. Reverted to the simple always-scroll-to-end behavior with animation disabled.
+
+v0.40.5 - Breathing room between last message and composer
+
+Changed
+- app/index.tsx: FlatList contentContainerStyle bottom padding increased from spacing.lg to spacing.lg + 10 so the final line of a streamed response no longer butts up against the composer during auto-scroll.
 

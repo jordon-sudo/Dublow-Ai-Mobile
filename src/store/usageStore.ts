@@ -145,3 +145,13 @@ export function selectVisibleKind(s: UsageState): BannerKind {
   if (rank(s.dismissedKind) >= rank(actual)) return 'none';
   return actual;
 }
+
+/**
+ * Like selectVisibleKind but ignores the user's dismissal. Used on pinned
+ * surfaces (Settings) where the banner must remain visible until actual
+ * usage drops, regardless of what was dismissed on the chat screen.
+ */
+export function selectActualKind(s: UsageState): BannerKind {
+  if (!s.available || !s.hasData) return 'none';
+  return deriveKind(s.totalUsed, s.totalLimit);
+}

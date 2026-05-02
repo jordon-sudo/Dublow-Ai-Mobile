@@ -171,7 +171,7 @@ export default function SettingsScreen() {
       <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.lg }}>
 
         <Section title="Usage" theme={theme}>
-          <UsageBanner />
+          <UsageBanner dismissible={false} />
           <UsageMeter />
         </Section>
 
